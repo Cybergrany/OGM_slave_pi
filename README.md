@@ -80,6 +80,10 @@ Subscribe example (NDJSON stream):
 ```bash
 printf '{"id":1,"cmd":"subscribe","types":["coils","holding_regs"]}\n' | socat - UNIX-CONNECT:/run/ogm_pi.sock
 ```
+Helper script:
+```bash
+./scripts/subscribe.py --socket /run/ogm_pi.sock --types coils,holding_regs
+```
 `subscribe` only emits events for Modbus master writes (IPC writes do not trigger events).
 
 `get` can include `since` to check for master-originated changes:
