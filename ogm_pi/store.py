@@ -61,6 +61,14 @@ class RegisterStore:
             self._apply_table(self.input_regs, tables.get("input_regs"), coerce_reg, "input_regs")
             self._apply_table(self.holding_regs, tables.get("holding_regs"), coerce_reg, "holding_regs")
 
+    def apply_index_updates(self, updates: Dict[str, List[tuple[int, int]]]) -> None:
+        """Apply sparse index updates (used for Modbus-originated changes)."""
+        with self._lock:
+            self._apply_index_updates(self.coils, updates.get("coils"), coerce_bit, "coils")
+            self._apply_index_updates(self.discretes, updates.get("discretes"), coerce_bit, "discretes")
+            self._apply_index_updates(self.input_regs, updates.get("input_regs"), coerce_reg, "input_regs")
+            self._apply_index_updates(self.holding_regs, updates.get("holding_regs"), coerce_reg, "holding_regs")
+
     def _get_pin_unlocked(self, pin: PinRecord) -> Dict[str, List[int]]:
         """Return pin values without acquiring the lock (caller holds lock)."""
         values: Dict[str, List[int]] = {}
@@ -119,6 +127,22 @@ class RegisterStore:
         if len(values) != len(buffer):
             raise ValueError(f"Expected {len(buffer)} {name} entries, got {len(values)}")
         buffer[:] = [coercer(v) for v in values]
+
+    @staticmethod
+    def _apply_index_updates(
+        buffer: List[int],
+        updates: List[tuple[int, int]] | None,
+        coercer,
+        name: str,
+    ) -> None:
+        """Apply sparse updates to a register buffer."""
+        if not updates:
+            return
+        max_index = len(buffer) - 1
+        for idx, value in updates:
+            if idx < 0 or idx > max_index:
+                raise ValueError(f"Index {idx} out of range for {name} table")
+            buffer[idx] = coercer(value)
 
 
 def normalize_values(payload: Any, expected: int) -> List[Any]:

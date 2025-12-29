@@ -5,14 +5,54 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import socket
 import threading
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, Optional, Set
 
 from .pinmap import PinMap
 from .store import RegisterStore
 
 LOGGER = logging.getLogger(__name__)
+
+DEFAULT_SUBSCRIBE_TYPES = {"coils", "holding_regs"}
+SUPPORTED_TYPES = {"coils", "holding_regs"}
+
+
+@dataclass
+class Subscriber:
+    """Subscription state for a single client connection."""
+
+    conn: socket.socket
+    types: Set[str]
+    names: Optional[Set[str]]
+    queue: "queue.Queue[Dict[str, Any]]"
+    dropped: int = 0
+
+    def matches(self, event: Dict[str, Any]) -> bool:
+        """Return True if this subscriber should receive the event."""
+        if event.get("event") != "change":
+            return False
+        event_types = set(event.get("types") or [])
+        if not event_types.intersection(self.types):
+            return False
+        name = event.get("name")
+        if self.names is not None and name not in self.names:
+            return False
+        return True
+
+    def enqueue(self, event: Dict[str, Any]) -> None:
+        """Queue an event for delivery, dropping the oldest if needed."""
+        try:
+            self.queue.put_nowait(event)
+        except queue.Full:
+            try:
+                self.queue.get_nowait()
+                self.queue.put_nowait(event)
+                self.dropped += 1
+            except queue.Empty:
+                pass
 
 
 class IPCServer:
@@ -24,6 +64,9 @@ class IPCServer:
         self._socket_path = socket_path
         self._sock: Optional[socket.socket] = None
         self._stop_event = threading.Event()
+        self._subscribers: list[Subscriber] = []
+        self._sub_lock = threading.Lock()
+        self._last_seq_by_pin: Dict[str, int] = {}
 
     def serve_forever(self) -> None:
         """Start accepting connections and processing JSON requests."""
@@ -47,6 +90,19 @@ class IPCServer:
             except OSError:
                 pass
 
+    def publish_events(self, events: Iterable[Dict[str, Any]]) -> None:
+        """Publish change events to any matching subscribers."""
+        with self._sub_lock:
+            subscribers = list(self._subscribers)
+        for event in events:
+            name = event.get("name")
+            seq = event.get("seq")
+            if name and isinstance(seq, int):
+                self._last_seq_by_pin[name] = seq
+            for sub in subscribers:
+                if sub.matches(event):
+                    sub.enqueue(event)
+
     def _handle_client(self, conn: socket.socket) -> None:
         """Handle a single client connection (one request per line)."""
         with conn:
@@ -55,16 +111,18 @@ class IPCServer:
                 line = raw.strip()
                 if not line:
                     continue
-                response = self._process_line(line)
+                request = self._decode_request(line)
+                if request is None:
+                    conn.sendall(json.dumps({"ok": False, "error": "Invalid JSON"}).encode("utf-8") + b"\n")
+                    continue
+                if request.get("cmd") == "subscribe":
+                    self._handle_subscribe(conn, request)
+                    return
+                response = self._handle_request(request)
                 conn.sendall(json.dumps(response).encode("utf-8") + b"\n")
 
-    def _process_line(self, line: bytes) -> Dict[str, Any]:
-        """Parse a request line and return a response payload."""
-        try:
-            request = json.loads(line.decode("utf-8"))
-        except json.JSONDecodeError as exc:
-            return {"ok": False, "error": f"Invalid JSON: {exc}"}
-
+    def _handle_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Dispatch request/response commands."""
         request_id = request.get("id")
         cmd = request.get("cmd")
         if not cmd:
@@ -77,7 +135,8 @@ class IPCServer:
                 return self._ok(self._pinmap.raw, request_id)
             if cmd == "get":
                 name = request.get("name")
-                return self._ok(self._get_pin(name), request_id)
+                since = request.get("since")
+                return self._ok(self._get_pin(name, since), request_id)
             if cmd == "set":
                 name = request.get("name")
                 values = request.get("values")
@@ -87,6 +146,56 @@ class IPCServer:
             return self._error(str(exc), request_id)
 
         return self._error(f"Unknown cmd '{cmd}'", request_id)
+
+    def _handle_subscribe(self, conn: socket.socket, request: Dict[str, Any]) -> None:
+        """Register a subscription and stream events until disconnect."""
+        request_id = request.get("id")
+        types = self._parse_types(request.get("types"))
+        names = self._parse_names(request.get("names"))
+        subscriber = Subscriber(conn=conn, types=types, names=names, queue=queue.Queue(maxsize=256))
+
+        with self._sub_lock:
+            self._subscribers.append(subscriber)
+
+        ack = {"ok": True, "subscribed": True}
+        if request_id is not None:
+            ack["id"] = request_id
+        conn.sendall(json.dumps(ack).encode("utf-8") + b"\n")
+
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    event = subscriber.queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+                conn.sendall(json.dumps(event).encode("utf-8") + b"\n")
+        except OSError:
+            pass
+        finally:
+            with self._sub_lock:
+                if subscriber in self._subscribers:
+                    self._subscribers.remove(subscriber)
+
+    def _parse_types(self, raw: Any) -> Set[str]:
+        """Parse subscription types, defaulting to master-writable registers."""
+        if raw is None:
+            return set(DEFAULT_SUBSCRIBE_TYPES)
+        if not isinstance(raw, list):
+            raise ValueError("types must be a list")
+        types = {str(t) for t in raw}
+        invalid = types.difference(SUPPORTED_TYPES)
+        if invalid:
+            raise ValueError(f"Unsupported types: {sorted(invalid)}")
+        return types
+
+    @staticmethod
+    def _parse_names(raw: Any) -> Optional[Set[str]]:
+        """Parse an optional list of pin names to filter on."""
+        if raw is None:
+            return None
+        if not isinstance(raw, list):
+            raise ValueError("names must be a list")
+        return {str(n) for n in raw}
 
     def _list_pins(self) -> Dict[str, Any]:
         """Return a listing of all pins with metadata."""
@@ -106,12 +215,21 @@ class IPCServer:
             )
         return {"pins": pins}
 
-    def _get_pin(self, name: Any) -> Dict[str, Any]:
+    def _get_pin(self, name: Any, since: Any = None) -> Dict[str, Any]:
         """Return register values for a named pin."""
         if not name:
             raise ValueError("Missing pin name")
         pin = self._pinmap.find_pin(str(name))
-        return {"name": pin.name, "values": self._store.get_pin(pin)}
+        payload = {"name": pin.name, "values": self._store.get_pin(pin)}
+        if since is not None:
+            try:
+                since_val = int(since)
+            except (TypeError, ValueError):
+                raise ValueError("since must be an integer")
+            last_seq = self._last_seq_by_pin.get(pin.name, 0)
+            payload["changed"] = last_seq > since_val
+            payload["last_seq"] = last_seq
+        return payload
 
     def _set_pin(self, name: Any, values: Any) -> Dict[str, Any]:
         """Set register values for a named pin."""
@@ -139,6 +257,14 @@ class IPCServer:
         if request_id is not None:
             resp["id"] = request_id
         return resp
+
+    @staticmethod
+    def _decode_request(line: bytes) -> Optional[Dict[str, Any]]:
+        """Decode a request line into JSON (returns None on failure)."""
+        try:
+            return json.loads(line.decode("utf-8"))
+        except json.JSONDecodeError:
+            return None
 
     def _get_listening_socket(self) -> socket.socket:
         """Create or reuse a listening socket (systemd socket activation supported)."""

@@ -66,6 +66,7 @@ Supported commands:
 - `get` (read all registers associated with a pin)
 - `set` (write registers; IPC allows all types)
 - `schema` (return the full pinmap JSON)
+- `subscribe` (stream master-originated changes for coils/holding regs)
 
 Examples:
 ```bash
@@ -73,6 +74,17 @@ python3 -m ogm_pi.cli list
 python3 -m ogm_pi.cli get DoorSensor
 python3 -m ogm_pi.cli set LightRelay --type coils --value 1
 python3 -m ogm_pi.cli schema
+```
+
+Subscribe example (NDJSON stream):
+```bash
+printf '{"id":1,"cmd":"subscribe","types":["coils","holding_regs"]}\n' | socat - UNIX-CONNECT:/run/ogm_pi.sock
+```
+`subscribe` only emits events for Modbus master writes (IPC writes do not trigger events).
+
+`get` can include `since` to check for master-originated changes:
+```bash
+printf '{"id":2,"cmd":"get","name":"LightRelay","since":40}\n' | socat - UNIX-CONNECT:/run/ogm_pi.sock
 ```
 
 ## Python example (direct socket)

@@ -47,6 +47,8 @@ def main() -> int:
     store = RegisterStore(pinmap.totals)
     store.seed_pin_hash(pinmap)
 
+    server = IPCServer(store, pinmap, args.socket_path)
+
     slave_address = args.slave_address if args.slave_address is not None else pinmap.address
     backend = create_backend(
         store,
@@ -58,10 +60,9 @@ def main() -> int:
         data_bits=args.data_bits,
         stop_bits=args.stop_bits,
         disabled=args.no_modbus,
+        event_sink=server.publish_events,
     )
     backend.start()
-
-    server = IPCServer(store, pinmap, args.socket_path)
 
     def shutdown(_signum=None, _frame=None):
         LOGGER.info("Shutting down")

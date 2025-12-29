@@ -1,19 +1,23 @@
 """Modbus RTU backend for OGM_slave_pi.
 
 Uses pylibmodbus (libmodbus binding) to serve RTU registers. The backend keeps
-RegisterStore as the canonical state and syncs tables around each request.
+RegisterStore as the canonical state and emits change events for master-writable
+registers (coils + holding_regs) when a Modbus write changes values.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-from typing import Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
-from .pinmap import PinMap
+from .pinmap import PinMap, PinRecord
 from .store import RegisterStore
 
 LOGGER = logging.getLogger(__name__)
+
+WATCH_TYPES = ("coils", "holding_regs")
 
 FALLBACK_BLOCK_TYPES = {
     "coils": 1,
@@ -21,6 +25,123 @@ FALLBACK_BLOCK_TYPES = {
     "holding_regs": 3,
     "input_regs": 4,
 }
+
+
+@dataclass
+class ChangeSet:
+    """Sparse index updates plus the corresponding event payloads."""
+
+    updates: Dict[str, List[tuple[int, int]]]
+    events: List[Dict[str, Any]]
+
+
+class ChangeTracker:
+    """Detect master-originated changes and build event payloads."""
+
+    def __init__(self, pinmap: PinMap) -> None:
+        totals = pinmap.totals
+        self._pins_by_name = pinmap.pins_by_name
+        self._coil_index = self._build_index_map(pinmap.pins, totals.get("coils", 0), "coils")
+        self._holding_index = self._build_index_map(pinmap.pins, totals.get("holding_regs", 0), "holding_regs")
+        self._seq = 0
+
+    def diff(self, before: Dict[str, List[int]], after: Dict[str, List[int]]) -> ChangeSet:
+        """Compute sparse updates and change events between two table snapshots."""
+        updates: Dict[str, List[tuple[int, int]]] = {"coils": [], "holding_regs": []}
+        changed: Dict[str, Set[str]] = {}
+
+        self._scan_table(
+            "coils",
+            before.get("coils", []),
+            after.get("coils", []),
+            self._coil_index,
+            updates,
+            changed,
+        )
+        self._scan_table(
+            "holding_regs",
+            before.get("holding_regs", []),
+            after.get("holding_regs", []),
+            self._holding_index,
+            updates,
+            changed,
+        )
+
+        events: List[Dict[str, Any]] = []
+        for name, types in changed.items():
+            pin = self._pins_by_name.get(name)
+            if pin is None:
+                continue
+            values: Dict[str, List[int]] = {}
+            if "coils" in types:
+                values["coils"] = self._slice_values(after.get("coils", []), pin.coils.start, pin.coils.count)
+            if "holding_regs" in types:
+                values["holding_regs"] = self._slice_values(
+                    after.get("holding_regs", []), pin.holding_regs.start, pin.holding_regs.count
+                )
+            if not values:
+                continue
+            self._seq += 1
+            events.append(
+                {
+                    "event": "change",
+                    "seq": self._seq,
+                    "source": "modbus",
+                    "name": name,
+                    "types": sorted(types),
+                    "values": values,
+                }
+            )
+
+        return ChangeSet(updates=updates, events=events)
+
+    @staticmethod
+    def _build_index_map(pins: List[PinRecord], size: int, span_attr: str) -> List[Optional[PinRecord]]:
+        """Build a lookup table from register index to PinRecord."""
+        if size <= 0:
+            return []
+        index: List[Optional[PinRecord]] = [None] * size
+        for pin in pins:
+            span = getattr(pin, span_attr)
+            if span.count <= 0:
+                continue
+            start = max(0, span.start)
+            end = min(size, span.start + span.count)
+            for idx in range(start, end):
+                index[idx] = pin
+        return index
+
+    @staticmethod
+    def _scan_table(
+        name: str,
+        before: List[int],
+        after: List[int],
+        index_map: List[Optional[PinRecord]],
+        updates: Dict[str, List[tuple[int, int]]],
+        changed: Dict[str, Set[str]],
+    ) -> None:
+        """Compare two tables and update the change tracking structures."""
+        if not before or not after:
+            return
+        max_len = min(len(before), len(after), len(index_map) if index_map else len(after))
+        if max_len <= 0:
+            return
+        for idx in range(max_len):
+            old_val = before[idx]
+            new_val = after[idx]
+            if old_val == new_val:
+                continue
+            updates[name].append((idx, new_val))
+            pin = index_map[idx] if idx < len(index_map) else None
+            if pin is not None:
+                changed.setdefault(pin.name, set()).add(name)
+
+    @staticmethod
+    def _slice_values(values: List[int], start: int, count: int) -> List[int]:
+        """Return a slice from a Modbus table, handling empty spans."""
+        if count <= 0:
+            return []
+        return list(values[start : start + count])
 
 
 class ModbusBackend:
@@ -142,8 +263,11 @@ class PylibmodbusAdapter:
         else:
             raise RuntimeError("pylibmodbus adapter requires handle_request()/receive() support")
 
-    def write_tables(self, tables: Dict[str, list[int]]) -> None:
-        for name, count in self._block_sizes.items():
+    def write_tables(self, tables: Dict[str, list[int]], names: Iterable[str] | None = None) -> None:
+        """Write the provided register tables into the Modbus server blocks."""
+        target_names = list(names) if names is not None else list(self._block_sizes.keys())
+        for name in target_names:
+            count = self._block_sizes.get(name, 0)
             if count <= 0:
                 continue
             values = tables.get(name)
@@ -151,9 +275,12 @@ class PylibmodbusAdapter:
                 continue
             self._set_values(name, values)
 
-    def read_tables(self) -> Dict[str, list[int]]:
+    def read_tables(self, names: Iterable[str] | None = None) -> Dict[str, list[int]]:
+        """Read selected register tables from the Modbus server blocks."""
+        target_names = list(names) if names is not None else list(self._block_sizes.keys())
         tables: Dict[str, list[int]] = {}
-        for name, count in self._block_sizes.items():
+        for name in target_names:
+            count = self._block_sizes.get(name, 0)
             if count <= 0:
                 continue
             tables[name] = list(self._get_values(name, count))
@@ -190,7 +317,7 @@ class PylibmodbusAdapter:
 
 
 class LibModbusBackend(ModbusBackend):
-    """pylibmodbus RTU backend with a simple sync loop."""
+    """pylibmodbus RTU backend with a change-detecting sync loop."""
 
     def __init__(
         self,
@@ -202,6 +329,7 @@ class LibModbusBackend(ModbusBackend):
         parity: str = "N",
         data_bits: int = 8,
         stop_bits: int = 1,
+        event_sink: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ) -> None:
         self._store = store
         self._pinmap = pinmap
@@ -214,6 +342,8 @@ class LibModbusBackend(ModbusBackend):
         self._adapter: Optional[PylibmodbusAdapter] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._tracker = ChangeTracker(pinmap)
+        self._event_sink = event_sink
 
     def start(self) -> None:
         totals = {
@@ -247,11 +377,15 @@ class LibModbusBackend(ModbusBackend):
             return
         while not self._stop_event.is_set():
             try:
-                tables = self._store.snapshot_tables()
-                self._adapter.write_tables(tables)
+                snapshot = self._store.snapshot_tables()
+                self._adapter.write_tables(snapshot)
                 self._adapter.handle_once()
-                updates = self._adapter.read_tables()
-                self._store.update_tables(updates)
+                updated = self._adapter.read_tables(names=WATCH_TYPES)
+                changes = self._tracker.diff(snapshot, updated)
+                if changes.updates:
+                    self._store.apply_index_updates(changes.updates)
+                if changes.events and self._event_sink is not None:
+                    self._event_sink(changes.events)
             except Exception as exc:
                 LOGGER.exception("Modbus backend error: %s", exc)
                 break
@@ -267,8 +401,19 @@ def create_backend(
     data_bits: int = 8,
     stop_bits: int = 1,
     disabled: bool = False,
+    event_sink: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> ModbusBackend:
     """Factory for the Modbus backend (null backend when disabled)."""
     if disabled:
         return NullBackend()
-    return LibModbusBackend(store, pinmap, serial, baud, slave_address, parity, data_bits, stop_bits)
+    return LibModbusBackend(
+        store,
+        pinmap,
+        serial,
+        baud,
+        slave_address,
+        parity,
+        data_bits,
+        stop_bits,
+        event_sink=event_sink,
+    )
