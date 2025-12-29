@@ -1,0 +1,150 @@
+# OGM_slave_pi
+
+Raspberry Pi Modbus RTU slave + IPC gateway for OpenGameMaster pin layouts.
+This repo reads the same `ExternalIODefines.yaml` used by `OGM_The_Core`,
+exports a per-board pinmap JSON (register layout + hash), and exposes
+registers over a local Unix socket for other programs on the Pi.
+
+## What lives here
+
+- `config/ExternalIODefines.yaml`: manual copy of the master pin list.
+- `config/PinTraits.yaml`: master register footprint definitions.
+- `config/CustomSlaveDefines/PinTraits.yaml`: custom pin footprints.
+- `scripts/export_pinmap.py`: YAML -> pinmap JSON exporter.
+- `ogm_pi/`: daemon + IPC client modules.
+- `systemd/`: example units for a root-owned socket and user-owned service.
+
+## Installation (Pi)
+
+1) **Install system dependencies** (libmodbus runtime + headers):
+```bash
+sudo apt-get update
+sudo apt-get install -y libmodbus-dev
+```
+
+2) **Create a virtualenv and install Python deps**:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+3) **Copy/refresh config files** (manual for now):
+- Update `config/ExternalIODefines.yaml` from `OGM_The_Core/Defines/ExternalIODefines.yaml`.
+- Update `config/PinTraits.yaml` from `OGM_Portable/Defines/PinTraits.yaml`.
+- Update `config/CustomSlaveDefines/PinTraits.yaml` from `OGM_The_Core/Defines/CustomSlaveDefines/PinTraits.yaml`.
+
+4) **Export a pinmap for the board address**:
+```bash
+python3 scripts/export_pinmap.py --address 99 --output out/pinmap_99.json
+```
+Notes:
+- Use `--name <board_name>` instead of `--address` if you prefer names.
+- Use `--skip-external` to ignore boards marked `external_management: true`.
+
+5) **Run the daemon**:
+```bash
+python3 -m ogm_pi.daemon \
+  --pinmap out/pinmap_99.json \
+  --serial /dev/ttyUSB0 \
+  --baud 250000 \
+  --slave-address 99
+```
+If you only want IPC (no Modbus backend), add `--no-modbus`.
+
+## IPC usage (Unix socket)
+
+The daemon exposes a line-delimited JSON protocol over `/run/ogm_pi.sock`.
+Each request is a single JSON line, and each response is a JSON line.
+If you are not using the systemd socket unit, set `--socket-path` to a
+user-writable path (for example `/tmp/ogm_pi.sock`) or run the daemon with
+privileges that can create `/run/ogm_pi.sock`.
+
+Supported commands:
+- `list` (list pins + spans)
+- `get` (read all registers associated with a pin)
+- `set` (write registers; IPC allows all types)
+- `schema` (return the full pinmap JSON)
+
+Examples:
+```bash
+python3 -m ogm_pi.cli list
+python3 -m ogm_pi.cli get DoorSensor
+python3 -m ogm_pi.cli set LightRelay --type coils --value 1
+python3 -m ogm_pi.cli schema
+```
+
+## Python example (direct socket)
+
+```python
+import json
+import socket
+
+SOCK_PATH = "/run/ogm_pi.sock"
+
+def request(payload):
+    msg = json.dumps(payload).encode("utf-8") + b"\n"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.connect(SOCK_PATH)
+        sock.sendall(msg)
+        data = sock.makefile("rb").readline()
+    return json.loads(data.decode("utf-8"))
+
+# Read a pin
+resp = request({"id": 1, "cmd": "get", "name": "DoorSensor"})
+print(resp)
+
+# Write a pin (coils/holding_regs are writable by Modbus; IPC can write any type)
+resp = request({
+    "id": 2,
+    "cmd": "set",
+    "name": "LightRelay",
+    "values": {"coils": [1]}
+})
+print(resp)
+```
+
+## Systemd integration (optional)
+
+This repo ships example units that create the socket as root and run the
+daemon as a non-root user. Adjust `User`, `Group`, and `ExecStart` to fit
+your system.
+
+```bash
+sudo cp systemd/ogm_pi.socket /etc/systemd/system/
+sudo cp systemd/ogm_pi.service /etc/systemd/system/
+
+# Edit the service to point at your pinmap and serial device.
+sudo systemctl daemon-reload
+sudo systemctl enable --now ogm_pi.socket
+```
+
+The socket unit controls permissions via `SocketMode` and `SocketGroup`.
+Add your client user to that group to allow IPC access.
+
+## Pinmap JSON schema (v1)
+
+Root fields (summary):
+- `schema_version`: integer
+- `generated_at`: ISO-8601 string
+- `source`: file paths used for generation
+- `network_baud`: from ExternalIODefines.yaml
+- `hash`: 32-bit FNV-1a layout hash (master-compatible)
+- `id`, `label`, `kind`, `address`, `zone`, `reset_on_init`, `has_stats`
+- `totals`: register totals by type
+- `pins`: ordered list, starting with injected `PIN_HASH`
+
+Each pin record:
+- `name`, `type`, `pin`, `args`
+- `coils`, `discretes`, `input_regs`, `holding_regs` as `[start, count]`
+
+`pin` may be an int or a string token (e.g., `A0`). `args` is always an
+array (empty if none) and is passed through without interpretation so
+future scripts can add semantics if needed.
+
+## Notes / gotchas
+
+- `PIN_HASH` uses input registers: low word first, high word second.
+- Pin order matters for register layout; do not reorder YAML entries.
+- Modbus writes should only target coils/holding regs, but IPC can write all.
+- Bridge child support is planned but not implemented yet (boards only).

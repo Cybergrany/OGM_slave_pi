@@ -1,0 +1,11 @@
+# NOTE: Manual copy from OGM_The_Core/Defines/CustomSlaveDefines/PinTraits.yaml for OGM_slave_pi.
+version: 1
+
+traits:
+  - { name: OUTPUT_DIGITAL_AUTO_RELEASE, namespaces: [master, slave, bridge_slave], coils: 1, discretes: 0, input_regs: 0, holding_regs: 0 }
+  - { name: OUTPUT_ADDRESSABLE,          namespaces: [master, slave, bridge_slave], coils: 1, discretes: 0, input_regs: 0, holding_regs: 7 }
+  - { name: TARDIS_NIXIE,                namespaces: [master, slave, bridge_slave], coils: 3, discretes: 1, input_regs: 0, holding_regs: 3 }
+  - { name: ROOM_CTRL_V1,                namespaces: [master, slave, bridge_slave], coils: 0, discretes: 9, input_regs: 0, holding_regs: 0 }
+  - { name: ROOM_CTRL_V2,                namespaces: [master, slave, bridge_slave], coils: 0, discretes: 14, input_regs: 0, holding_regs: 0 }
+
+aliases: []

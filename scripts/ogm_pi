@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+"""Thin wrapper for running the IPC client from the repo root."""
+
+from ogm_pi.cli import main
+
+
+if __name__ == "__main__":
+    main()

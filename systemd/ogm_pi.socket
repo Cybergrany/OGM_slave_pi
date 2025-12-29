@@ -1,0 +1,11 @@
+# OGM_slave_pi IPC socket (root-owned, systemd-managed).
+[Unit]
+Description=OGM Pi IPC Socket
+
+[Socket]
+ListenStream=/run/ogm_pi.sock
+SocketMode=0660
+SocketGroup=ogm
+
+[Install]
+WantedBy=sockets.target

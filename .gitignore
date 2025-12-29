@@ -1,1 +1,15 @@
-# stub
+# Python cache/venv artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.python-version
+
+# Generated pinmap exports
+out/
+pinmap_*.json
+
+# IDE/OS noise
+.idea/
+.vscode/
+.DS_Store

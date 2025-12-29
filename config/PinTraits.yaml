@@ -1,0 +1,39 @@
+# NOTE: Manual copy from OGM_Portable/Defines/PinTraits.yaml for OGM_slave_pi.
+# Canonical register footprints for core pin types.
+# Each entry lists the namespaces to specialize (master/slave/bridge_slave)
+# and the register counts. Aliases mirror an existing footprint.
+version: 1
+
+traits:
+  - { name: PLAIN_COIL,                namespaces: [master, bridge_slave], coils: 1, discretes: 0, input_regs: 0, holding_regs: 0 }
+  - { name: PLAIN_COIL,                namespaces: [slave], coils: 1, discretes: 0, input_regs: 0, holding_regs: 0 }
+  - { name: PLAIN_DISCRETE_IN,         namespaces: [master, slave, bridge_slave], coils: 0, discretes: 1, input_regs: 0, holding_regs: 0 }
+  - { name: PLAIN_INPUT_REG,           namespaces: [master, slave, bridge_slave], coils: 0, discretes: 0, input_regs: 1, holding_regs: 0 }
+  - { name: PLAIN_HOLDINGREG,          namespaces: [master, bridge_slave], coils: 0, discretes: 0, input_regs: 0, holding_regs: 1 }
+  - { name: PLAIN_HOLDING_REG,         namespaces: [slave], coils: 0, discretes: 0, input_regs: 0, holding_regs: 1 }
+  - { name: PLAIN_INPUTREG_TWO_WORD,   namespaces: [master, slave, bridge_slave], coils: 0, discretes: 0, input_regs: 3, holding_regs: 0 }
+  - { name: PLAIN_HOLDINGREG_TWO_WORD, namespaces: [master, slave, bridge_slave], coils: 0, discretes: 0, input_regs: 0, holding_regs: 3 }
+
+  - { name: INPUT_DIGITAL,   namespaces: [master, slave, bridge_slave], coils: 0, discretes: 1, input_regs: 0, holding_regs: 0 }
+  - { name: OUTPUT_DIGITAL,  namespaces: [master, slave, bridge_slave], coils: 1, discretes: 0, input_regs: 0, holding_regs: 0 }
+  - { name: INPUT_ANALOG,    namespaces: [master, slave, bridge_slave], coils: 0, discretes: 0, input_regs: 1, holding_regs: 0 }
+  - { name: OUTPUT_PWM,      namespaces: [master, slave, bridge_slave], coils: 1, discretes: 0, input_regs: 0, holding_regs: 1 }
+  - { name: TIMED_DIGITAL,   namespaces: [master, slave, bridge_slave], coils: 1, discretes: 0, input_regs: 0, holding_regs: 2 }
+
+  - { name: BOARD_RESET, namespaces: [master, slave, bridge_slave], coils: 1, discretes: 0, input_regs: 0, holding_regs: 0 }
+  - { name: BOARD_STATS, namespaces: [master, slave, bridge_slave], coils: 0, discretes: 0, input_regs: 15, holding_regs: 0 }  # 6 stats + 3x two-word
+  - { name: PIN_HASH, namespaces: [master, slave, bridge_slave], coils: 0, discretes: 0, input_regs: 2, holding_regs: 0 }
+  - { name: BRIDGE_CORE, namespaces: [master, bridge_slave], coils: 0, discretes: 0, input_regs: 17, holding_regs: 0 }  # PIN_HASH (2) + BOARD_STATS (15)
+
+  - { name: BRIDGE_ACTIVE,     namespaces: [master, bridge_slave], coils: 1, discretes: 0, input_regs: 0, holding_regs: 0 }
+  - { name: BRIDGE_HEALTH,     namespaces: [master, bridge_slave], coils: 0, discretes: 1, input_regs: 0, holding_regs: 0 }
+  - { name: BRIDGE_WRITE_ACK,  namespaces: [master, bridge_slave], coils: 0, discretes: 0, input_regs: 1, holding_regs: 0 }
+  - { name: BRIDGE_WRITE_FAIL, namespaces: [master, bridge_slave], coils: 0, discretes: 0, input_regs: 1, holding_regs: 0 }
+
+  # BAM dimmer footprints
+  - { name: BAM_DIMMER, namespaces: [master], coils: 1, discretes: 0, input_regs: 0, holding_regs: 2 }
+  - { name: BAM_DIMMER, namespaces: [slave], coils: 1, discretes: 0, input_regs: 0, holding_regs: 2, template: true }
+
+aliases:
+  - { name: BAM_DIMMER, namespaces: [bridge_slave], target: BAM_DIMMER, target_namespace: master }
+  - { name: PLAIN_HOLDINGREG, namespaces: [slave], target: PLAIN_HOLDING_REG, target_namespace: slave }

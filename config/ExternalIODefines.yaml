@@ -1,0 +1,512 @@
+# NOTE: Manual copy from OGM_The_Core/Defines/ExternalIODefines.yaml for OGM_slave_pi.
+# External IO definition source of truth (boards + bridge children).
+# Generated headers under Defines/Gen are derived from this file; do not edit
+# generated files by hand.
+# Set `external_management: true` on any board or bridge child to keep its pin
+# list documented here while skipping code generation (e.g. vendor-managed or
+# Raspberry Pi slaves handled outside PlatformIO). See examples below.
+# Set `has_stats: true` on a board or bridge child to inject a BOARD_STATS block.
+version: 1
+network_baud: 250000
+
+boards:
+  # Example: externally managed slave skipped by the header generator
+  # - name: vendor_pi
+  #   address: 99
+  #   zone: 0
+  #   external_management: true
+  #   pins:
+  #     - { name: vendor_led, type: OUTPUT_DIGITAL, pin: 2 }
+  - name: corridor_switches
+    address: 1
+    zone: 0
+    has_stats: true
+    reset_on_init: true
+    pins:
+      - { name: wheel_sw_1,  type: INPUT_DIGITAL, pin: 2 }
+      - { name: wheel_sw_2,  type: INPUT_DIGITAL, pin: 3 }
+      - { name: wheel_sw_3,  type: INPUT_DIGITAL, pin: 4 }
+      - { name: wheel_sw_4,  type: INPUT_DIGITAL, pin: 5 }
+      - { name: wheel_sw_5,  type: INPUT_DIGITAL, pin: 6 }
+      - { name: wheel_sw_6,  type: INPUT_DIGITAL, pin: 7 }
+      - { name: wheel_sw_7,  type: INPUT_DIGITAL, pin: 8 }
+      - { name: wheel_sw_8,  type: INPUT_DIGITAL, pin: 9 }
+      - { name: wheel_sw_9,  type: INPUT_DIGITAL, pin: 10 }
+      - { name: wheel_sw_10, type: INPUT_DIGITAL, pin: 11 }
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: corridor_spare
+    address: 2
+    zone: 0
+    reset_on_init: true
+    pins:
+      - { name: board2_null, type: INPUT_DIGITAL, pin: 2 }
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: corridor_rgb
+    address: 3
+    zone: 0
+    has_stats: false
+    reset_on_init: true
+    pins:
+      - { name: blkhd_1_R, type: BAM_DIMMER, pin: 2, args: [LOW, 255, 200] }
+      - { name: blkhd_1_G, type: BAM_DIMMER, pin: 3, args: [LOW, 255, 200] }
+      - { name: blkhd_1_B, type: BAM_DIMMER, pin: 4, args: [LOW, 255, 200] }
+      - { name: blkhd_2_R, type: BAM_DIMMER, pin: 5, args: [LOW, 255, 200] }
+      - { name: blkhd_2_G, type: BAM_DIMMER, pin: 6, args: [LOW, 255, 200] }
+      - { name: blkhd_2_B, type: BAM_DIMMER, pin: 7, args: [LOW, 255, 200] }
+      - { name: blkhd_3_R, type: BAM_DIMMER, pin: 8, args: [LOW, 255, 200] }
+      - { name: blkhd_3_G, type: BAM_DIMMER, pin: 9, args: [LOW, 255, 200] }
+      - { name: blkhd_3_B, type: BAM_DIMMER, pin: 10, args: [LOW, 255, 200] }
+      - { name: blkhd_4_R, type: BAM_DIMMER, pin: 11, args: [LOW, 255, 200] }
+      - { name: blkhd_4_G, type: BAM_DIMMER, pin: 12, args: [LOW, 255, 200] }
+      - { name: blkhd_4_B, type: BAM_DIMMER, pin: 13, args: [LOW, 255, 200] }
+      - { name: blkhd_5_R, type: BAM_DIMMER, pin: A0, args: [LOW, 255, 200] }
+      - { name: blkhd_5_G, type: BAM_DIMMER, pin: A1, args: [LOW, 255, 200] }
+      - { name: blkhd_5_B, type: BAM_DIMMER, pin: A2, args: [LOW, 255, 200] }
+      - { name: blkhd_6_R, type: BAM_DIMMER, pin: A3, args: [LOW, 255, 200] }
+      - { name: blkhd_6_G, type: BAM_DIMMER, pin: A4, args: [LOW, 255, 200] }
+      - { name: blkhd_6_B, type: BAM_DIMMER, pin: A5, args: [LOW, 255, 200] }
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: corridor_rgbw #new bl
+    address: 4
+    zone: 0
+    reset_on_init: true
+    pins:
+      - { name: blkhd_7_R, type: BAM_DIMMER, pin: 2, args: [LOW, 255, 200] }
+      - { name: blkhd_7_G, type: BAM_DIMMER, pin: 3, args: [LOW, 255, 200] }
+      - { name: blkhd_7_B, type: BAM_DIMMER, pin: 4, args: [LOW, 255, 200] }
+      - { name: blkhd_8_R, type: BAM_DIMMER, pin: 5, args: [LOW, 255, 200] }
+      - { name: blkhd_8_G, type: BAM_DIMMER, pin: 6, args: [LOW, 255, 200] }
+      - { name: blkhd_8_B, type: BAM_DIMMER, pin: 7, args: [LOW, 255, 200] }
+      - { name: blkhd_9_R, type: BAM_DIMMER, pin: 8, args: [LOW, 255, 200] }
+      - { name: blkhd_9_G, type: BAM_DIMMER, pin: 9, args: [LOW, 255, 200] }
+      - { name: blkhd_9_B, type: BAM_DIMMER, pin: 10, args: [LOW, 255, 200] }
+      - { name: blkhd_10_R, type: BAM_DIMMER, pin: 11, args: [LOW, 255, 200] }
+      - { name: blkhd_10_G, type: BAM_DIMMER, pin: 12, args: [LOW, 255, 200] }
+      - { name: blkhd_10_B, type: BAM_DIMMER, pin: 13, args: [LOW, 255, 200] }
+      - { name: SPARE_CORRIDOR_12V_1, type: OUTPUT_DIGITAL, pin: A0, args: [0] }
+      - { name: SPARE_CORRIDOR_12V_2, type: OUTPUT_DIGITAL, pin: A1, args: [0] }
+      - { name: blkhd_1_W, type: BAM_DIMMER, pin: A2, args: [HIGH, 255, 200] }
+      - { name: blkhd_1_PH, type: BAM_DIMMER, pin: A3, args: [LOW, 255, 200] }
+      - { name: blkhd_2_W, type: BAM_DIMMER, pin: A4, args: [HIGH, 255, 200] }
+      - { name: blkhd_2_PH, type: BAM_DIMMER, pin: A5, args: [LOW, 255, 200] }
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: corridor_w
+    address: 5
+    zone: 0
+    reset_on_init: true
+    pins:
+      - { name: blkhd_3_W,  type: BAM_DIMMER, pin: 2,  args: [HIGH, 255, 200] }
+      - { name: blkhd_3_PH, type: BAM_DIMMER, pin: 3,  args: [LOW, 255, 200] }
+      - { name: blkhd_4_W,  type: BAM_DIMMER, pin: 4,  args: [HIGH, 255, 200] }
+      - { name: blkhd_4_PH, type: BAM_DIMMER, pin: 5,  args: [LOW, 255, 200] }
+      - { name: blkhd_5_W,  type: BAM_DIMMER, pin: 6,  args: [HIGH, 255, 200] }
+      - { name: blkhd_5_PH, type: BAM_DIMMER, pin: 7,  args: [LOW, 255, 200] }
+      - { name: blkhd_6_W,  type: BAM_DIMMER, pin: 8,  args: [HIGH, 255, 200] }
+      - { name: blkhd_6_PH, type: BAM_DIMMER, pin: 9,  args: [LOW, 255, 200] }
+      - { name: blkhd_7_W,  type: BAM_DIMMER, pin: 10, args: [HIGH, 255, 200] }
+      - { name: blkhd_7_PH, type: BAM_DIMMER, pin: 11, args: [LOW, 255, 200] }
+      - { name: blkhd_8_W,  type: BAM_DIMMER, pin: 12, args: [HIGH, 255, 200] }
+      - { name: blkhd_8_PH, type: BAM_DIMMER, pin: 13, args: [LOW, 255, 200] }
+      - { name: blkhd_9_W,  type: BAM_DIMMER, pin: A0, args: [HIGH, 255, 200] }
+      - { name: blkhd_9_PH, type: BAM_DIMMER, pin: A1, args: [LOW, 255, 200] }
+      - { name: blkhd_10_W,  type: BAM_DIMMER, pin: A2, args: [HIGH, 255, 200] }
+      - { name: blkhd_10_PH, type: BAM_DIMMER, pin: A3, args: [LOW, 255, 200] }
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: behind_spanners_miniaddressable # pin A5 18 pixels
+    address: 6
+    zone: 2
+    reset_on_init: true
+    custom_slave_impl: miniaddressable_highlighter.h
+    custom_slave_libs: ["adafruit/Adafruit NeoPixel"]
+    pins:
+      - {name: on_1, type: OUTPUT_ADDRESSABLE, pin: A5,  args: [A5, 18, 250, 255, 0, 0, 150, 0, 18]}
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: behind_spanners_inputs 
+    address: 7
+    zone: 2
+    reset_on_init: true
+    has_stats: true
+    pins:
+      - { name: socket_in,      type: INPUT_DIGITAL, pin: 2 }
+      - { name: sp_in_1,        type: INPUT_DIGITAL, pin: 3 }
+      - { name: sp_in_2,        type: INPUT_DIGITAL, pin: 4 }
+      - { name: sp_in_3,        type: INPUT_DIGITAL, pin: 5 }
+      - { name: sp_in_4,        type: INPUT_DIGITAL, pin: 6 }
+      - { name: sp_in_5,        type: INPUT_DIGITAL, pin: 7 }
+      - { name: sp_in_6,        type: INPUT_DIGITAL, pin: 8 }
+      - { name: sp_top_sw_1,    type: INPUT_DIGITAL, pin: 9 }
+      - { name: sp_top_sw_2,    type: INPUT_DIGITAL, pin: 10 }
+      - { name: sp_top_sw_3,    type: INPUT_DIGITAL, pin: 11 }
+      - { name: sp_top_sw_4,    type: INPUT_DIGITAL, pin: 12 }
+      - { name: sp_top_sw_5,    type: INPUT_DIGITAL, pin: A0 }
+      - { name: sp_top_sw_6,    type: INPUT_DIGITAL, pin: A1 }
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: behind_spanners_solenoids # auto-release outputs to fail safe if master never clears
+    address: 8
+    zone: 0
+    reset_on_init: true
+    has_stats: true
+    custom_slave_impl: quick_release_outputs.h
+    pins:
+      - { name: sol_1,      type: OUTPUT_DIGITAL_AUTO_RELEASE, pin: 2, args: [2, 200] }
+      - { name: sol_2,      type: OUTPUT_DIGITAL_AUTO_RELEASE, pin: 3, args: [3, 200] }
+      - { name: sol_3,      type: OUTPUT_DIGITAL_AUTO_RELEASE, pin: 4, args: [4, 200] }
+      - { name: sol_4,      type: OUTPUT_DIGITAL_AUTO_RELEASE, pin: 5, args: [5, 200] }
+      - { name: sol_5,      type: OUTPUT_DIGITAL_AUTO_RELEASE, pin: 6, args: [6, 200] }
+      - { name: sol_6,      type: OUTPUT_DIGITAL,              pin: 7, args: [0] }
+      - { name: big_solen,  type: OUTPUT_DIGITAL_AUTO_RELEASE, pin: 9, args: [9, 200] }
+      - { name: door_push,  type: OUTPUT_DIGITAL_AUTO_RELEASE, pin: A0, args: [A0, 900] }
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: mv_room_above_spanner
+    address: 9
+    zone: 2
+    reset_on_init: true
+    has_stats: true
+    pins:
+      - { name: mag_pt,             type: OUTPUT_DIGITAL, pin: 2, args: [0] }
+      - { name: mag_sb,             type: OUTPUT_DIGITAL, pin: 3, args: [0] }
+      - { name: mag_scrt,           type: OUTPUT_DIGITAL, pin: 4 , args: [0]}
+      - { name: floodlights,        type: OUTPUT_DIGITAL, pin: 5 , args: [1]}
+      - { name: fans,               type: OUTPUT_DIGITAL, pin: 6 , args: [0]}
+      - { name: pt_door_closed,     type: INPUT_DIGITAL, pin: 7 }
+      - { name: main_spanner_downlight,             type: BAM_DIMMER, pin: 8, args: [HIGH, 200, 200]}
+      - { name: plug_spanner_downlight,             type: BAM_DIMMER, pin: 9, args: [HIGH, 200, 200]}
+      - { name: strobe_1,             type: BAM_DIMMER, pin: 10, args: [HIGH, 200, 200]}
+      - { name: strobe_2,             type: BAM_DIMMER, pin: 11, args: [HIGH, 200, 200]}
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: mv_room_above_sb_door
+    address: 10
+    zone: 2
+    reset_on_init: true
+    has_stats: true
+    pins:
+      - { name: green_hi,             type: BAM_DIMMER, pin: 2, args: [LOW, 255, 200]}
+      - { name: red_hi,             type: BAM_DIMMER, pin: 3, args: [LOW, 255, 200] }
+      - { name: blue_hi,           type: BAM_DIMMER, pin: 4, args: [HIGH, 180, 200] }
+      - { name: door_open_sw,     type: INPUT_DIGITAL, pin: A5}
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: mv_room_under_suitcase
+    address: 11
+    zone: 2
+    reset_on_init: true
+    has_stats: true
+    pins:
+      - { name: bb_dir_1,             type: OUTPUT_DIGITAL, pin: 2,args: [0] }
+      - { name: bb_dir_2,             type: OUTPUT_DIGITAL, pin: 3, args: [0] }
+      - { name: white_hi_top,         type: BAM_DIMMER, pin: 4, args: [HIGH, 255, 200]}
+      - { name: green_hi_top,         type: BAM_DIMMER, pin: 5, args: [LOW, 255, 200] }
+      - { name: purple_L,             type: BAM_DIMMER, pin: 6, args: [LOW, 255, 200] }
+      - { name: white_L,              type: BAM_DIMMER, pin: 7, args: [HIGH, 255, 200] }
+      - { name: white_R,              type: BAM_DIMMER, pin: 8, args: [HIGH, 255, 200]}
+      - { name: purple_R,                       type: BAM_DIMMER, pin: 9, args: [LOW, 255, 200] }
+      - { name: bb_actuator_overload,           type: INPUT_DIGITAL, pin: 10}
+      - { name: suitcase_shoot_bolt,            type: OUTPUT_DIGITAL, pin: 11, args: [0] }
+      - { name: suitcase_shoot_bolt_sw,         type: INPUT_DIGITAL, pin: 12 }
+      - { name: bb_shoot_bolt_1,                type: OUTPUT_DIGITAL, pin: A2, args: [0] }
+      - { name: bb_shoot_bolt_2,                type: OUTPUT_DIGITAL, pin: A3, args: [0] }
+      - { name: suitcase_door_closed,          type: INPUT_DIGITAL, pin: A4 }
+      - { name: suitcase_up_reset,             type: INPUT_DIGITAL, pin: A5 }
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+      
+  - name: tardis_nixie
+    address: 12
+    zone: 3
+    reset_on_init: true
+    custom_slave_impl: tardis_nixie.h
+    custom_slave_libs: ["git+https://github.com/allexoK/EasyNixie.git"]
+    pins:
+      - {name: nixie,                           type: TARDIS_NIXIE,               args: [6, 4, 5, 3, 30000]}
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: mv_room_ctrl_1
+    address: 13
+    zone: 2
+    reset_on_init: true
+    has_stats: true
+    custom_slave_impl: room_ctrl.h
+    custom_slave_libs: []
+    pins:
+      - {name: room_ctrl,                type: ROOM_CTRL_V1,                args: []}
+      - { name: E_door_open,             type: INPUT_DIGITAL,                pin: 10}
+      - { name: tardis_overload,         type: INPUT_DIGITAL,                pin: 11}
+      - { name: room_overload,           type: INPUT_DIGITAL,                pin: A0}
+      - { name: console_overload,        type: INPUT_DIGITAL,                pin: A1}
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: mv_room_ctrl_2
+    address: 14
+    zone: 2
+    reset_on_init: true
+    has_stats: true
+    custom_slave_impl: room_ctrl.h
+    custom_slave_libs: []
+    pins:
+      - {name: room_ctrl,                    type: ROOM_CTRL_V2,               args: []}
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: mv_room_controller
+    address: 15
+    zone: 2
+    reset_on_init: true
+    has_stats: true
+    pins:
+      - { name: tardis_open,                  type: OUTPUT_DIGITAL, pin: 2,args: [0] }
+      - { name: tardis_close,                 type: OUTPUT_DIGITAL, pin: 3,args: [0] }
+      - { name: room_pt,                      type: OUTPUT_DIGITAL, pin: 4,args: [0] }
+      - { name: room_sb,                      type: OUTPUT_DIGITAL, pin: 5,args: [0] }
+      - { name: console_up,                    type: OUTPUT_DIGITAL, pin: 6,args: [0] }
+      - { name: console_down,                  type: OUTPUT_DIGITAL, pin: 7,args: [0] }
+      - { name: tardis_open_in,                 type: INPUT_DIGITAL, pin: 8}
+      - { name: tardis_close_in,                 type: INPUT_DIGITAL, pin: 9}
+      - { name: room_at_sb,                     type: INPUT_DIGITAL, pin: A0}
+      - { name: room_at_pt,                       type: INPUT_DIGITAL, pin: A1}
+      - { name: e_stop_active,                     type: INPUT_DIGITAL, pin: A2}
+      - { name: tense_sense,                        type: INPUT_DIGITAL, pin: A3}
+      - { name: any_console_engaged,                 type: INPUT_DIGITAL, pin: A4}
+      - { name: roof_up_sense,                        type: INPUT_DIGITAL, pin: A5}
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: tardis_disp_lights
+    address: 16
+    zone: 3
+    reset_on_init: true
+    has_stats: true
+    pins:
+      - { name: bar_white_L,              type: BAM_DIMMER,     pin: 2, args: [LOW, 60, 200]}
+      - { name: bar_white_CL,              type: BAM_DIMMER,     pin: 3, args: [HIGH, 60, 200]}
+      - { name: bar_white_CR,              type: BAM_DIMMER,     pin: 4, args: [HIGH, 60, 200]}
+      - { name: bar_white_R,              type: BAM_DIMMER,     pin: 5, args: [LOW, 60, 200]}
+      - { name: bar_purp_L,              type: BAM_DIMMER,     pin: 6, args: [HIGH, 200, 200]}
+      - { name: bar_purp_R,              type: BAM_DIMMER,     pin: 7, args: [HIGH, 200, 200]}
+      - { name: spinner_L_1,              type: BAM_DIMMER,     pin: 8, args: [HIGH, 180, 200]}
+      - { name: spinner_L_2,              type: BAM_DIMMER,     pin: 9, args: [HIGH, 180, 200]}
+      - { name: spinner_L_3,              type: BAM_DIMMER,     pin: A2, args: [HIGH, 180, 200]}
+      - { name: spinner_R_1,              type: BAM_DIMMER,     pin: A3, args: [HIGH, 180, 200]}
+      - { name: spinner_R_2,              type: BAM_DIMMER,     pin: A4, args: [HIGH, 180, 200]}
+      - { name: spinner_R_3,              type: BAM_DIMMER,     pin: A5, args: [HIGH, 180, 200]}
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: behind_tardis_addressable #new BL
+    address: 17
+    zone: 3
+    reset_on_init: true
+    custom_slave_impl: miniaddressable_highlighter.h
+    custom_slave_libs: ["adafruit/Adafruit NeoPixel"]
+    pins:
+      - {name: on_1, type: OUTPUT_ADDRESSABLE, pin: 12,  args: [12, 1,  250, 255, 0, 0, 150, 0, 1]} #selenite (1) - D12
+      - {name: on_2, type: OUTPUT_ADDRESSABLE, pin: 11,  args: [11, 11, 250, 255, 0, 0, 150, 0, 11]} #bar L (11) - D11
+      - {name: on_3, type: OUTPUT_ADDRESSABLE, pin: 10,  args: [10, 11,  250, 255, 0, 0, 150, 0, 11]} #bar R (11)  - D10
+      - {name: on_4, type: OUTPUT_ADDRESSABLE, pin: 9,  args: [9,   1,   250, 255, 0, 0, 150, 0, 1]} #glass ball(1) - D9
+      - {name: on_5, type: OUTPUT_ADDRESSABLE, pin: 8,  args: [8,   1,   250, 255, 0, 0, 150, 0, 1]} #thyatron(1) - D8
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: mv_room_led_roof
+    address: 20
+    zone: 2
+    reset_on_init: true
+    pins:
+      - { name: active_STARTUP,        type: PLAIN_COIL,                args: [1] }
+      - { name: active_BLACKOUT,       type: PLAIN_COIL,                args: [0] }
+      - { name: active_FILL,           type: PLAIN_COIL,                args: [0] }
+      - { name: active_TILES,          type: PLAIN_COIL,                args: [0] }
+      - { name: active_SELECTPX,       type: PLAIN_COIL,                args: [0] }
+      - { name: active_GRIDALIGNTEST,  type: PLAIN_COIL,                args: [0] }
+      - { name: active_TESTTILES,      type: PLAIN_COIL,                args: [0] }
+
+      - { name: fill_blendTime,        type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: fill_R,                type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: fill_G,                type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: fill_B,                type: PLAIN_HOLDINGREG,         args: [0] }
+
+      - { name: tiles_setAnchor,       type: PLAIN_COIL,                args: [0] }
+
+      - { name: tiles_colour_0,        type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_1,        type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_2,        type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_3,        type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_4,        type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_5,        type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_6,        type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_7,        type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_8,        type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_9,        type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_10,       type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_11,       type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_12,       type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_13,       type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_14,       type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_15,       type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_16,       type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_17,       type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_18,       type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_19,       type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_20,       type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+      - { name: tiles_colour_21,       type: PLAIN_HOLDINGREG_TWO_WORD,  args: [0] }
+
+      - { name: tiles_time_0,          type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_1,          type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_2,          type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_3,          type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_4,          type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_5,          type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_6,          type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_7,          type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_8,          type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_9,          type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_10,         type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_11,         type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_12,         type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_13,         type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_14,         type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_15,         type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_16,         type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_17,         type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_18,         type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_19,         type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_20,         type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: tiles_time_21,         type: PLAIN_HOLDINGREG,         args: [0] }
+
+      - { name: SELECTPX_pxpos,        type: PLAIN_HOLDINGREG,         args: [0] }
+
+      - { name: GRIDALIGN_crossX,      type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: GRIDALIGN_crossY,      type: PLAIN_HOLDINGREG,         args: [0] }
+      - { name: GRIDALIGN_shiftX,      type: PLAIN_COIL,                args: [0] }
+
+      - { name: TESTTILES_tileIndex4x3, type: PLAIN_HOLDINGREG,        args: [0] }
+      - { name: TESTTILES_tileIndex2x5, type: PLAIN_HOLDINGREG,        args: [0] }
+      - { name: TESTTILES_xAnchor,      type: PLAIN_HOLDINGREG,        args: [0] }
+      - { name: TESTTILES_swap,         type: PLAIN_HOLDINGREG,        args: [0] }
+
+      - { name: RESET_canary,          type: PLAIN_COIL,                args: [0] }
+      - { name: RESET,                 type: BOARD_RESET,              }
+  
+  - name: armoury_behind_compressor
+    address: 21
+    zone: 1
+    reset_on_init: true
+    has_stats: true
+    pins:
+      - { name: compressor_lts,              type: BAM_DIMMER,     pin: 2, args: [HIGH, 200, 200]}
+      - { name: mv_room_blkhead_mag,         type: OUTPUT_DIGITAL, pin: 6, args: [0]}
+      - { name: armoury_fire_door_mag,        type: OUTPUT_DIGITAL, pin: 7, args: [0]}
+      - { name: armoury_fire_door_sw,           type: INPUT_DIGITAL, pin: 8}
+      - { name: mv_room_blkhead_sw,         type: INPUT_DIGITAL, pin: 9} #true: closed
+      - { name: workshop_mag,                 type: OUTPUT_DIGITAL, pin: 10, args: [0]}
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: armoury_behind_tank_wheel #NEWBL
+    address: 22
+    zone: 1
+    reset_on_init: true
+    pins:
+      - { name: headlamp_r_B,              type: BAM_DIMMER,     pin: 2, args: [LOW, 255, 200]}
+      - { name: headlamp_r_R,              type: BAM_DIMMER,     pin: 3, args: [LOW, 255, 200]}
+      - { name: headlamp_r_G,              type: BAM_DIMMER,     pin: 4, args: [LOW, 255, 200]}
+      - { name: headlamp_R_w_w,            type: BAM_DIMMER,     pin: 5, args: [HIGH, 255, 200]}
+      - { name: headlamp_FANS,             type: OUTPUT_DIGITAL,     pin: 6, args: [0]}
+      - { name: headlamp_L_r,              type: BAM_DIMMER,     pin: 7, args: [LOW, 255, 200]}
+      - { name: headlamp_L_b,              type: BAM_DIMMER,     pin: 8, args: [LOW, 255, 200]}
+      - { name: headlamp_L_g,              type: BAM_DIMMER,     pin: 9, args: [LOW, 255, 200]}
+      - { name: headlamp_L_w_w,            type: BAM_DIMMER,     pin: 10, args: [HIGH, 255, 200]}
+      - { name: hatch_decor,               type: BAM_DIMMER,     pin: 11, args: [HIGH, 180, 200]}
+      - { name: undercarriage,            type: BAM_DIMMER,     pin: 13, args:  [HIGH, 255, 200]}
+      - { name: hatch_switch,             type: INPUT_DIGITAL,   pin: A2}
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+
+bridges:
+  # Example: mark a child as externally managed to keep its address documented
+  # while skipping header generation
+  # - name: vendor_bridge
+  #   address: 20
+  #   children:
+  #     - name: vendor_child
+  #       downstream_address: 121
+  #       external_management: true
+  #       pins:
+  #         - { name: vendor_output, type: OUTPUT_DIGITAL, pin: 2 }
+- name: bridge_a
+  address: 99
+  zone: 0
+  reset_on_init: true
+  has_stats: true
+  children:
+    - name: alpha_child1
+      downstream_address: 31
+      has_stats: true
+      pins:
+        - { name: myExampleOutputDigital1, type: OUTPUT_DIGITAL, pin: 2, args: [false] }
+        - { name: myExampleInputAnalog1,   type: INPUT_ANALOG,   pin: 3 }
+        - { name: myExampleTimed1,         type: TIMED_DIGITAL, pin: 4, args: [false, 100, 400] }
+    - name: alpha_child2
+      downstream_address: 32
+      has_stats: true
+      pins:
+        - { name: myExampleDimmer1, type: BAM_DIMMER, pin: 5, args: [false, 100, 200] }
+        - { name: myExamplePwm1,    type: OUTPUT_PWM, pin: 6, args: [false, 1200] }
+    - name: alpha_child3
+      downstream_address: 33
+      has_stats: false
+      pins:
+        - { name: myExampleInputDigital1, type: INPUT_DIGITAL, pin: 7 }
+        - { name: myExampleReset1,        type: BOARD_RESET,   pin: 0 }
+
+- name: bridge_b
+  address: 100
+  zone: 0
+  reset_on_init: true
+  has_stats: true
+  children:
+    - name: bravo_child1
+      downstream_address: 41
+      has_stats: true
+      pins:
+        - { name: myExampleOutputDigital2, type: OUTPUT_DIGITAL, pin: 2, args: [true] }
+        - { name: myExampleInputAnalog2,   type: INPUT_ANALOG,   pin: 3 }
+    - name: bravo_child2
+      downstream_address: 42
+      has_stats: true
+      pins:
+        - { name: myExampleDimmer2, type: BAM_DIMMER, pin: 4, args: [true, 180, 300] }
+        - { name: myExampleTimed2,  type: TIMED_DIGITAL, pin: 5, args: [false, 250, 250] }
+    - name: bravo_child3
+      downstream_address: 43
+      has_stats: false
+      pins:
+        - { name: myExampleOutputPWM2,   type: OUTPUT_PWM,    pin: 6, args: [false, 800] }
+        - { name: myExampleInputDigital2, type: INPUT_DIGITAL, pin: 7 }
+
+- name: bridge_c
+  address: 101
+  zone: 0
+  reset_on_init: true
+  has_stats: true
+  children:
+    - name: charlie_child1
+      downstream_address: 51
+      has_stats: true
+      pins:
+        - { name: myExampleInputDigital3,  type: INPUT_DIGITAL, pin: 2 }
+        - { name: myExampleOutputDigital3, type: OUTPUT_DIGITAL, pin: 3, args: [false] }
+    - name: charlie_child2
+      downstream_address: 52
+      has_stats: true
+      pins:
+        - { name: myExampleTimed3,     type: TIMED_DIGITAL, pin: 4, args: [true, 150, 500] }
+        - { name: myExampleOutputPWM3, type: OUTPUT_PWM,    pin: 5, args: [true, 600] }
+    - name: charlie_child3
+      downstream_address: 53
+      has_stats: false
+      pins:
+        - { name: myExampleDimmer3,  type: BAM_DIMMER, pin: 6, args: [false, 200, 350] }
+        - { name: myExampleInputAnalog3, type: INPUT_ANALOG, pin: 7 }

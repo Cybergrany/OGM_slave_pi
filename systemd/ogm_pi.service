@@ -1,0 +1,17 @@
+# OGM_slave_pi daemon service (pair with ogm_pi.socket for activation).
+[Unit]
+Description=OGM Pi Modbus RTU + IPC Daemon
+Requires=ogm_pi.socket
+After=ogm_pi.socket
+
+[Service]
+Type=simple
+User=ogm_pi
+Group=ogm
+WorkingDirectory=/opt/OGM_slave_pi
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m ogm_pi.daemon --pinmap /etc/ogm_pi/pinmap.json --serial /dev/ttyUSB0 --baud 250000 --slave-address 99
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
