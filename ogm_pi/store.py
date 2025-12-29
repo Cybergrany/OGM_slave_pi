@@ -43,6 +43,24 @@ class RegisterStore:
                     raise ValueError(f"Unknown register type '{reg_name}'")
             return self._get_pin_unlocked(pin)
 
+    def snapshot_tables(self) -> Dict[str, List[int]]:
+        """Return copies of the register tables (used for Modbus sync)."""
+        with self._lock:
+            return {
+                "coils": list(self.coils),
+                "discretes": list(self.discretes),
+                "input_regs": list(self.input_regs),
+                "holding_regs": list(self.holding_regs),
+            }
+
+    def update_tables(self, tables: Dict[str, List[int]]) -> None:
+        """Replace register tables from a Modbus backend snapshot."""
+        with self._lock:
+            self._apply_table(self.coils, tables.get("coils"), coerce_bit, "coils")
+            self._apply_table(self.discretes, tables.get("discretes"), coerce_bit, "discretes")
+            self._apply_table(self.input_regs, tables.get("input_regs"), coerce_reg, "input_regs")
+            self._apply_table(self.holding_regs, tables.get("holding_regs"), coerce_reg, "holding_regs")
+
     def _get_pin_unlocked(self, pin: PinRecord) -> Dict[str, List[int]]:
         """Return pin values without acquiring the lock (caller holds lock)."""
         values: Dict[str, List[int]] = {}
@@ -92,6 +110,15 @@ class RegisterStore:
         values = normalize_values(payload, span.count)
         coerced = [coercer(v) for v in values]
         buffer[span.start : span.start + span.count] = coerced
+
+    @staticmethod
+    def _apply_table(buffer: List[int], values: List[Any] | None, coercer, name: str) -> None:
+        """Replace a full register table with validated values."""
+        if values is None:
+            return
+        if len(values) != len(buffer):
+            raise ValueError(f"Expected {len(buffer)} {name} entries, got {len(values)}")
+        buffer[:] = [coercer(v) for v in values]
 
 
 def normalize_values(payload: Any, expected: int) -> List[Any]:

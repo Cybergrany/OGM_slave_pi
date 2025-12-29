@@ -19,7 +19,7 @@ registers over a local Unix socket for other programs on the Pi.
 1) **Install system dependencies** (libmodbus runtime + headers):
 ```bash
 sudo apt-get update
-sudo apt-get install -y libmodbus-dev
+sudo apt-get install -y libmodbus libmodbus-dev
 ```
 
 2) **Create a virtualenv and install Python deps**:
@@ -51,6 +51,7 @@ python3 -m ogm_pi.daemon \
   --slave-address 99
 ```
 If you only want IPC (no Modbus backend), add `--no-modbus`.
+Optional serial settings: `--parity`, `--data-bits`, `--stop-bits`.
 
 ## IPC usage (Unix socket)
 

@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import logging
 import signal
-import sys
 
 from .ipc_server import IPCServer
 from .modbus_server import create_backend
@@ -24,6 +23,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pinmap", required=True, help="Path to exported pinmap JSON")
     parser.add_argument("--serial", default="/dev/ttyUSB0", help="Serial device for Modbus RTU")
     parser.add_argument("--baud", type=int, default=250000, help="Modbus RTU baud rate")
+    parser.add_argument("--parity", default="N", help="Serial parity (N/E/O)")
+    parser.add_argument("--data-bits", type=int, default=8, help="Serial data bits")
+    parser.add_argument("--stop-bits", type=int, default=1, help="Serial stop bits")
     parser.add_argument("--slave-address", type=int, default=None, help="Override Modbus slave address")
     parser.add_argument("--socket-path", default="/run/ogm_pi.sock", help="IPC Unix socket path")
     parser.add_argument("--no-modbus", action="store_true", help="Disable Modbus backend (IPC only)")
@@ -46,7 +48,17 @@ def main() -> int:
     store.seed_pin_hash(pinmap)
 
     slave_address = args.slave_address if args.slave_address is not None else pinmap.address
-    backend = create_backend(store, pinmap, args.serial, args.baud, slave_address, disabled=args.no_modbus)
+    backend = create_backend(
+        store,
+        pinmap,
+        args.serial,
+        args.baud,
+        slave_address,
+        parity=args.parity,
+        data_bits=args.data_bits,
+        stop_bits=args.stop_bits,
+        disabled=args.no_modbus,
+    )
     backend.start()
 
     server = IPCServer(store, pinmap, args.socket_path)
