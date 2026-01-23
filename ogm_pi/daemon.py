@@ -10,8 +10,10 @@ import logging
 import signal
 
 from .ipc_server import IPCServer
+from .gpio import LibgpiodAdapter, NullGpioAdapter
 from .modbus_server import create_backend
 from .pinmap import PinMap
+from .pin_runtime import PinRuntime
 from .store import RegisterStore
 
 LOGGER = logging.getLogger(__name__)
@@ -29,6 +31,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--slave-address", type=int, default=None, help="Override Modbus slave address")
     parser.add_argument("--socket-path", default="/run/ogm_pi.sock", help="IPC Unix socket path")
     parser.add_argument("--no-modbus", action="store_true", help="Disable Modbus backend (IPC only)")
+    parser.add_argument("--no-gpio", action="store_true", help="Disable GPIO access")
+    parser.add_argument("--gpio-chip", default="/dev/gpiochip0", help="libgpiod chip path")
+    parser.add_argument("--pin-poll-ms", type=int, default=20, help="Pin update poll interval (ms)")
+    parser.add_argument("--stats-interval", type=float, default=5.0, help="Board stats update interval (s)")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING)")
     return parser.parse_args()
 
@@ -49,6 +55,24 @@ def main() -> int:
 
     server = IPCServer(store, pinmap, args.socket_path)
 
+    if args.no_gpio:
+        gpio = NullGpioAdapter()
+    else:
+        try:
+            gpio = LibgpiodAdapter(args.gpio_chip)
+        except Exception as exc:
+            LOGGER.warning("GPIO init failed (%s); running with NullGpioAdapter", exc)
+            gpio = NullGpioAdapter()
+
+    runtime = PinRuntime(
+        pinmap,
+        store,
+        gpio,
+        poll_interval=max(args.pin_poll_ms, 1) / 1000.0,
+        stats_interval=max(args.stats_interval, 0.5),
+    )
+    runtime.start()
+
     slave_address = args.slave_address if args.slave_address is not None else pinmap.address
     backend = create_backend(
         store,
@@ -67,7 +91,9 @@ def main() -> int:
     def shutdown(_signum=None, _frame=None):
         LOGGER.info("Shutting down")
         server.stop()
+        runtime.stop()
         backend.stop()
+        gpio.close()
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)

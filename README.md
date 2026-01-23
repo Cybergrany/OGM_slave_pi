@@ -161,7 +161,7 @@ future scripts can add semantics if needed.
 
 ## Notes / gotchas
 
-- `PIN_HASH` uses input registers: low word first, high word second.
+- `PIN_HASH` uses input registers: low word first, high word second, CRC16 third.
 - Pin order matters for register layout; do not reorder YAML entries.
 - Modbus writes should only target coils/holding regs, but IPC can write all.
 - Bridge child support is planned but not implemented yet (boards only).
