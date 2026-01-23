@@ -1,3 +1,4 @@
 # Runtime dependencies for OGM_slave_pi tools and daemon.
 PyYAML>=6.0
 pylibmodbus>=0.5.0  # Requires libmodbus installed on the host.
+gpiod>=1.5  # Prefer system package python3-libgpiod on Debian/RPi OS.

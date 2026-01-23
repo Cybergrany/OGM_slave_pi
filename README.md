@@ -16,10 +16,10 @@ registers over a local Unix socket for other programs on the Pi.
 
 ## Installation (Pi)
 
-1) **Install system dependencies** (libmodbus runtime + headers):
+1) **Install system dependencies** (libmodbus runtime + headers + libgpiod bindings):
 ```bash
 sudo apt-get update
-sudo apt-get install -y libmodbus libmodbus-dev
+sudo apt-get install -y libmodbus libmodbus-dev python3-libgpiod
 ```
 
 2) **Create a virtualenv and install Python deps**:
@@ -52,6 +52,17 @@ python3 -m ogm_pi.daemon \
 ```
 If you only want IPC (no Modbus backend), add `--no-modbus`.
 Optional serial settings: `--parity`, `--data-bits`, `--stop-bits`.
+GPIO example (BCM numbering via libgpiod):
+```bash
+python3 -m ogm_pi.daemon \
+  --pinmap out/pinmap_99.json \
+  --serial /dev/ttyUSB0 \
+  --baud 250000 \
+  --slave-address 99 \
+  --gpio-chip /dev/gpiochip0 \
+  --pin-poll-ms 20 \
+  --stats-interval 5
+```
 
 ## IPC usage (Unix socket)
 
@@ -165,3 +176,21 @@ future scripts can add semantics if needed.
 - Pin order matters for register layout; do not reorder YAML entries.
 - Modbus writes should only target coils/holding regs, but IPC can write all.
 - Bridge child support is planned but not implemented yet (boards only).
+
+## Example Raspberry Pi board entry
+
+```yaml
+- name: slave_pi
+  address: 99
+  zone: 0
+  external_management: true
+  has_stats: true
+  reset_on_init: true
+  pins:
+    # Use Raspberry Pi BCM GPIO numbering.
+    - { name: pi_input_1,  type: INPUT_DIGITAL,  pin: 17 }
+    - { name: pi_input_2,  type: INPUT_DIGITAL,  pin: 27 }
+    - { name: pi_output_1, type: OUTPUT_DIGITAL, pin: 22, args: [0] }
+    - { name: pi_output_2, type: OUTPUT_DIGITAL, pin: 23, args: [0] }
+    - { name: RESET, type: BOARD_RESET, pin: 0 }
+```

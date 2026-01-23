@@ -1,4 +1,3 @@
-# NOTE: Manual copy from OGM_The_Core/Defines/ExternalIODefines.yaml for OGM_slave_pi.
 # External IO definition source of truth (boards + bridge children).
 # Generated headers under Defines/Gen are derived from this file; do not edit
 # generated files by hand.
@@ -17,6 +16,19 @@ boards:
   #   external_management: true
   #   pins:
   #     - { name: vendor_led, type: OUTPUT_DIGITAL, pin: 2 }
+  - name: slave_pi
+    address: 99
+    zone: 0
+    external_management: true
+    has_stats: true
+    reset_on_init: true
+    pins:
+      # Use Raspberry Pi BCM GPIO numbering.
+      - { name: pi_input_1,  type: INPUT_DIGITAL,  pin: 17 }
+      - { name: pi_input_2,  type: INPUT_DIGITAL,  pin: 27 }
+      - { name: pi_output_1, type: OUTPUT_DIGITAL, pin: 22, args: [0] }
+      - { name: pi_output_2, type: OUTPUT_DIGITAL, pin: 23, args: [0] }
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
   - name: corridor_switches
     address: 1
     zone: 0
@@ -421,6 +433,38 @@ boards:
       - { name: hatch_decor,               type: BAM_DIMMER,     pin: 11, args: [HIGH, 180, 200]}
       - { name: undercarriage,            type: BAM_DIMMER,     pin: 13, args:  [HIGH, 255, 200]}
       - { name: hatch_switch,             type: INPUT_DIGITAL,   pin: A2}
+      - { name: headlight_spkr,           type: OUTPUT_DIGITAL_AUTO_RELEASE, pin: A3, args: [A3, 650] }
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: corridor_door_2
+    address: 23
+    zone: 0
+    reset_on_init: true
+    has_stats: true
+    custom_slave_impl: quick_release_outputs.h
+    pins:
+      - { name: spanner_dl,               type: OUTPUT_DIGITAL,     pin: 6, args: [1]}
+      - { name: shredder_dl,              type: BAM_DIMMER,         pin: 7, args: [HIGH, 120, 200]}
+      - { name: shredder_shoot,           type: OUTPUT_DIGITAL_AUTO_RELEASE, pin: 8, args: [8, 1000] }
+      - { name: spanner_shoot,            type: OUTPUT_DIGITAL_AUTO_RELEASE, pin: 9, args: [9, 1000] }
+      - { name: entry_mag,                type: OUTPUT_DIGITAL,     pin: 10, args: [0]}
+      - { name: shred_door_locked,        type: INPUT_DIGITAL,        pin: 11}
+      - { name: shred_door_unlocked,      type: INPUT_DIGITAL,        pin: 12}
+      - { name: span_door_locked,         type: INPUT_DIGITAL,        pin: A0}
+      - { name: span_door_unlocked,       type: INPUT_DIGITAL,        pin: A1}
+      - { name: entry_door_sw,            type: INPUT_DIGITAL,        pin: A2}
+      - { name: spanner_sw,               type: INPUT_DIGITAL,        pin: A3}
+      - { name: shredder_active,          type: INPUT_DIGITAL,        pin: A4}
+      - { name: RESET, type: BOARD_RESET, pin: 0 }
+
+  - name: test_seg_disp
+    address: 69
+    zone: 3
+    reset_on_init: true
+    custom_slave_impl: segmentDisplay_tm1637.h
+    custom_slave_libs: ["git+https://github.com/avishorp/TM1637.git"]
+    pins:
+      - {name: seg_display,               type: segmentDisplay_tm1637,    args: [1, 2]}
       - { name: RESET, type: BOARD_RESET, pin: 0 }
 
 
@@ -435,78 +479,27 @@ bridges:
   #       external_management: true
   #       pins:
   #         - { name: vendor_output, type: OUTPUT_DIGITAL, pin: 2 }
-- name: bridge_a
-  address: 99
-  zone: 0
+- name: bridge_console
+  address: 90
+  zone: 2
   reset_on_init: true
   has_stats: true
+  custom_slave_impl: quick_release_outputs.h
+  pins:
+    - { name: locker_LED_mid_red,   type: OUTPUT_DIGITAL, pin: 22, args: [false] } #false - on
+    - { name: locker_LED_mid_green, type: OUTPUT_DIGITAL, pin: 23, args: [true] } #true - off
+    - { name: locker_LED_pt_red,    type: OUTPUT_DIGITAL, pin: 24, args: [false] }
+    - { name: locker_LED_pt_green, type: OUTPUT_DIGITAL, pin: 25, args: [true] } 
+    - { name: locker_LED_sb_red,    type: OUTPUT_DIGITAL, pin: 26, args: [false] }
+    - { name: locker_LED_sb_green, type: OUTPUT_DIGITAL, pin: 27, args: [true] } 
+    - { name: locker_pt_lock, type: OUTPUT_DIGITAL_AUTO_RELEASE, pin: 28, args: [28, 1000] }
+    - { name: locker_mid_lock, type: OUTPUT_DIGITAL_AUTO_RELEASE, pin: 29, args: [29, 1000] }
+    - { name: locker_sb_lock, type: OUTPUT_DIGITAL_AUTO_RELEASE, pin: 30, args: [30, 1000] }
+    - { name: console_pwr,    type: OUTPUT_DIGITAL, pin: 31, args: [false] }
+    - { name: smart_glass,    type: OUTPUT_DIGITAL, pin: 32, args: [false] }
   children:
     - name: alpha_child1
       downstream_address: 31
       has_stats: true
       pins:
-        - { name: myExampleOutputDigital1, type: OUTPUT_DIGITAL, pin: 2, args: [false] }
-        - { name: myExampleInputAnalog1,   type: INPUT_ANALOG,   pin: 3 }
-        - { name: myExampleTimed1,         type: TIMED_DIGITAL, pin: 4, args: [false, 100, 400] }
-    - name: alpha_child2
-      downstream_address: 32
-      has_stats: true
-      pins:
-        - { name: myExampleDimmer1, type: BAM_DIMMER, pin: 5, args: [false, 100, 200] }
-        - { name: myExamplePwm1,    type: OUTPUT_PWM, pin: 6, args: [false, 1200] }
-    - name: alpha_child3
-      downstream_address: 33
-      has_stats: false
-      pins:
-        - { name: myExampleInputDigital1, type: INPUT_DIGITAL, pin: 7 }
-        - { name: myExampleReset1,        type: BOARD_RESET,   pin: 0 }
-
-- name: bridge_b
-  address: 100
-  zone: 0
-  reset_on_init: true
-  has_stats: true
-  children:
-    - name: bravo_child1
-      downstream_address: 41
-      has_stats: true
-      pins:
-        - { name: myExampleOutputDigital2, type: OUTPUT_DIGITAL, pin: 2, args: [true] }
-        - { name: myExampleInputAnalog2,   type: INPUT_ANALOG,   pin: 3 }
-    - name: bravo_child2
-      downstream_address: 42
-      has_stats: true
-      pins:
-        - { name: myExampleDimmer2, type: BAM_DIMMER, pin: 4, args: [true, 180, 300] }
-        - { name: myExampleTimed2,  type: TIMED_DIGITAL, pin: 5, args: [false, 250, 250] }
-    - name: bravo_child3
-      downstream_address: 43
-      has_stats: false
-      pins:
-        - { name: myExampleOutputPWM2,   type: OUTPUT_PWM,    pin: 6, args: [false, 800] }
-        - { name: myExampleInputDigital2, type: INPUT_DIGITAL, pin: 7 }
-
-- name: bridge_c
-  address: 101
-  zone: 0
-  reset_on_init: true
-  has_stats: true
-  children:
-    - name: charlie_child1
-      downstream_address: 51
-      has_stats: true
-      pins:
-        - { name: myExampleInputDigital3,  type: INPUT_DIGITAL, pin: 2 }
-        - { name: myExampleOutputDigital3, type: OUTPUT_DIGITAL, pin: 3, args: [false] }
-    - name: charlie_child2
-      downstream_address: 52
-      has_stats: true
-      pins:
-        - { name: myExampleTimed3,     type: TIMED_DIGITAL, pin: 4, args: [true, 150, 500] }
-        - { name: myExampleOutputPWM3, type: OUTPUT_PWM,    pin: 5, args: [true, 600] }
-    - name: charlie_child3
-      downstream_address: 53
-      has_stats: false
-      pins:
-        - { name: myExampleDimmer3,  type: BAM_DIMMER, pin: 6, args: [false, 200, 350] }
-        - { name: myExampleInputAnalog3, type: INPUT_ANALOG, pin: 7 }
+        - { name: sample_pin,   type: OUTPUT_DIGITAL, pin: 22, args: [false] }
