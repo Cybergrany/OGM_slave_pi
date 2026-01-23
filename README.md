@@ -178,6 +178,7 @@ future scripts can add semantics if needed.
 - Pin order matters for register layout; do not reorder YAML entries.
 - Modbus writes should only target coils/holding regs, but IPC can write all.
 - Bridge child pinmaps are supported, but OGM_slave_pi itself remains a single Modbus slave (it does not act as a bridge).
+- If a pin is named `pi_cpu_temp_c_x100` or `pi_cpu_load_1m_x100`, the daemon will populate it from system metrics.
 
 ## Example Raspberry Pi board entry
 
@@ -194,5 +195,7 @@ future scripts can add semantics if needed.
     - { name: pi_input_2,  type: INPUT_DIGITAL,  pin: 27 }
     - { name: pi_output_1, type: OUTPUT_DIGITAL, pin: 22, args: [0] }
     - { name: pi_output_2, type: OUTPUT_DIGITAL, pin: 23, args: [0] }
+    - { name: pi_cpu_temp_c_x100,  type: PLAIN_INPUT_REG, args: [0] }    # centigrade * 100
+    - { name: pi_cpu_load_1m_x100, type: PLAIN_INPUT_REG, args: [0] }    # load avg * 100
     - { name: RESET, type: BOARD_RESET, pin: 0 }
 ```

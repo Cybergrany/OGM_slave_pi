@@ -19,7 +19,7 @@ boards:
   - name: slave_pi
     address: 99
     zone: 0
-    external_management: true
+    external_management: false
     has_stats: true
     reset_on_init: true
     pins:
@@ -28,6 +28,8 @@ boards:
       - { name: pi_input_2,  type: INPUT_DIGITAL,  pin: 27 }
       - { name: pi_output_1, type: OUTPUT_DIGITAL, pin: 22, args: [0] }
       - { name: pi_output_2, type: OUTPUT_DIGITAL, pin: 23, args: [0] }
+      - { name: pi_cpu_temp_c_x100,  type: PLAIN_INPUT_REG, args: [0] }
+      - { name: pi_cpu_load_1m_x100, type: PLAIN_INPUT_REG, args: [0] }
       - { name: RESET, type: BOARD_RESET, pin: 0 }
   - name: corridor_switches
     address: 1

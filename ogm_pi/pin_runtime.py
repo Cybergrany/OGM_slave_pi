@@ -70,6 +70,29 @@ def _mem_available_kb() -> int:
     return 0
 
 
+def _cpu_temp_c_x100() -> int:
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", "r", encoding="utf-8") as handle:
+            raw = handle.read().strip()
+        if raw and raw.lstrip("-").isdigit():
+            millideg = int(raw)
+            return _clamp_u16(millideg // 10)
+    except OSError:
+        return 0
+    return 0
+
+
+def _cpu_load_1m_x100() -> int:
+    try:
+        with open("/proc/loadavg", "r", encoding="utf-8") as handle:
+            parts = handle.read().split()
+        if parts:
+            return _clamp_u16(int(float(parts[0]) * 100.0))
+    except (OSError, ValueError):
+        return 0
+    return 0
+
+
 @dataclass
 class RegHandle:
     store: RegisterStore
@@ -189,6 +212,36 @@ class PlainInputReg(PinHandler):
 
     def reset(self) -> None:
         self.ir.reset()
+
+
+class MetricInputReg(PinHandler):
+    def __init__(self, pin: PinRecord, store: RegisterStore, runtime: "PinRuntime", interval_s: float = 1.0) -> None:
+        super().__init__(pin, store, runtime)
+        self._interval = interval_s
+        self._last = 0.0
+        self._reg = RegHandle(store, "input_regs", pin.input_regs, 0)
+
+    def update(self, now: float) -> None:
+        if now - self._last < self._interval:
+            return
+        self._last = now
+        self._reg.set(self.read_value())
+
+    def read_value(self) -> int:
+        raise NotImplementedError
+
+    def reset(self) -> None:
+        self._reg.set(0)
+
+
+class CpuTempInputReg(MetricInputReg):
+    def read_value(self) -> int:
+        return _cpu_temp_c_x100()
+
+
+class CpuLoadInputReg(MetricInputReg):
+    def read_value(self) -> int:
+        return _cpu_load_1m_x100()
 
 
 class PlainHoldingReg(PinHandler):
@@ -371,6 +424,11 @@ HANDLER_TYPES = {
     "BOARD_STATS": BoardStats,
 }
 
+METRIC_INPUT_REGS = {
+    "pi_cpu_temp_c_x100": CpuTempInputReg,
+    "pi_cpu_load_1m_x100": CpuLoadInputReg,
+}
+
 
 class PinRuntime:
     """Runtime loop for GPIO/board logic tied to the register store."""
@@ -398,6 +456,12 @@ class PinRuntime:
 
     def _build_handlers(self) -> None:
         for pin in self.pinmap.pins:
+            metric_cls = METRIC_INPUT_REGS.get(pin.name)
+            if metric_cls is not None:
+                if pin.type not in ("PLAIN_INPUT_REG", "INPUT_REG"):
+                    LOGGER.warning("Metric pin %s should use PLAIN_INPUT_REG (found %s)", pin.name, pin.type)
+                self._handlers.append(metric_cls(pin, self.store, self))
+                continue
             handler_cls = HANDLER_TYPES.get(pin.type)
             if handler_cls is None:
                 LOGGER.debug("Skipping unsupported pin type %s (%s)", pin.type, pin.name)
