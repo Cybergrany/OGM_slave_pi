@@ -41,6 +41,8 @@ python3 scripts/export_pinmap.py --address 99 --output out/pinmap_99.json
 Notes:
 - Use `--name <board_name>` instead of `--address` if you prefer names.
 - Use `--skip-external` to ignore boards marked `external_management: true`.
+- For bridge children, use `--child-name`/`--child-address` and optionally `--bridge-name`:
+  `python3 scripts/export_pinmap.py --child-name slave_pi --bridge-name bridge_console --output out/pinmap_slave_pi.json`
 
 5) **Run the daemon**:
 ```bash
@@ -172,10 +174,10 @@ future scripts can add semantics if needed.
 
 ## Notes / gotchas
 
-- `PIN_HASH` uses input registers: low word first, high word second, CRC16 third.
+- `PIN_HASH` uses input registers: low word first, high word second, CRC16 third. Bridge children use `child_hash_<child_name>` for the hash pin name.
 - Pin order matters for register layout; do not reorder YAML entries.
 - Modbus writes should only target coils/holding regs, but IPC can write all.
-- Bridge child support is planned but not implemented yet (boards only).
+- Bridge child pinmaps are supported, but OGM_slave_pi itself remains a single Modbus slave (it does not act as a bridge).
 
 ## Example Raspberry Pi board entry
 

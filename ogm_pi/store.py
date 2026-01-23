@@ -96,9 +96,13 @@ class RegisterStore:
 
     def seed_pin_hash(self, pinmap: PinMap) -> None:
         """Populate the PIN_HASH input registers from the pinmap hash value."""
-        try:
-            pin = pinmap.find_pin("board_hash")
-        except KeyError:
+        pin = pinmap.pins_by_name.get("board_hash")
+        if pin is None:
+            for candidate in pinmap.pins:
+                if candidate.type == "PIN_HASH":
+                    pin = candidate
+                    break
+        if pin is None:
             return
         if pin.input_regs.count < 3:
             return
