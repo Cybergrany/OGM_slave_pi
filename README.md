@@ -158,11 +158,36 @@ Add your client user to that group to allow IPC access.
 ## Install script (Pi)
 
 ```bash
-sudo ./scripts/install_pi.sh
+sudo ./scripts/install_pi.sh --board-name slave_pi --slave-address 99 --serial /dev/ttyUSB0
 ```
 
 This installs OS deps, creates the service user, copies the repo to `/opt/OGM_slave_pi`,
-installs the venv, writes `/etc/ogm_pi/ogm_pi.yaml`, and enables systemd units.
+installs the venv, writes `/etc/ogm_pi/ogm_pi.yaml`, exports a pinmap to
+`/etc/ogm_pi/pinmap.json`, and enables systemd units.
+
+Common variations:
+
+```bash
+# Bridge child pinmap (under bridge_console)
+sudo ./scripts/install_pi.sh --child-name slave_pi --bridge-name bridge_console --slave-address 99
+
+# Use a prebuilt pinmap
+sudo ./scripts/install_pi.sh --pinmap-src /path/to/pinmap.json --write-pinmap
+
+# Update install in place (preserve config/pinmap)
+sudo ./scripts/install_pi.sh --update
+
+# Remove units (keep config + install)
+sudo ./scripts/install_pi.sh --uninstall
+
+# Remove units and purge install/config dirs
+sudo ./scripts/install_pi.sh --uninstall --purge
+```
+
+`--write-config` (or any config override flag) rewrites `ogm_pi.yaml` using defaults.
+Use `--skip-apt`/`--skip-pip` for offline installs and `--skip-systemd` to avoid
+touching systemd. If you change `--target-dir`, `--config-dir`, or `--socket-path`,
+the installer writes matching systemd units.
 
 ## Pinmap JSON schema (v1)
 
