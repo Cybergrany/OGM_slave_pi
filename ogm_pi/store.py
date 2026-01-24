@@ -69,6 +69,18 @@ class RegisterStore:
             self._apply_index_updates(self.input_regs, updates.get("input_regs"), coerce_reg, "input_regs")
             self._apply_index_updates(self.holding_regs, updates.get("holding_regs"), coerce_reg, "holding_regs")
 
+    def read_registers(self, reg_name: str, span: RegSpan) -> List[int]:
+        """Read a span from a register table by name."""
+        with self._lock:
+            buffer = self._select_buffer(reg_name)
+            return self._read_span(buffer, span)
+
+    def write_registers(self, reg_name: str, span: RegSpan, payload: Any) -> None:
+        """Write a span to a register table by name."""
+        with self._lock:
+            buffer, coercer = self._select_buffer(reg_name, with_coercer=True)
+            self._write_span(buffer, span, payload, reg_name, coercer)
+
     def _get_pin_unlocked(self, pin: PinRecord) -> Dict[str, List[int]]:
         """Return pin values without acquiring the lock (caller holds lock)."""
         values: Dict[str, List[int]] = {}
@@ -84,18 +96,24 @@ class RegisterStore:
 
     def seed_pin_hash(self, pinmap: PinMap) -> None:
         """Populate the PIN_HASH input registers from the pinmap hash value."""
-        try:
-            pin = pinmap.find_pin("board_hash")
-        except KeyError:
+        pin = pinmap.pins_by_name.get("board_hash")
+        if pin is None:
+            for candidate in pinmap.pins:
+                if candidate.type == "PIN_HASH":
+                    pin = candidate
+                    break
+        if pin is None:
             return
-        if pin.input_regs.count < 2:
+        if pin.input_regs.count < 3:
             return
         value = int(pinmap.hash) & 0xFFFFFFFF
         lo = value & 0xFFFF
         hi = (value >> 16) & 0xFFFF
+        crc = crc16_modbus_words(lo, hi)
         with self._lock:
             self.input_regs[pin.input_regs.start] = lo
             self.input_regs[pin.input_regs.start + 1] = hi
+            self.input_regs[pin.input_regs.start + 2] = crc
 
     @staticmethod
     def _read_span(buffer: List[int], span: RegSpan) -> List[int]:
@@ -118,6 +136,18 @@ class RegisterStore:
         values = normalize_values(payload, span.count)
         coerced = [coercer(v) for v in values]
         buffer[span.start : span.start + span.count] = coerced
+
+    def _select_buffer(self, reg_name: str, with_coercer: bool = False):
+        """Return the backing buffer (and coercer optionally) for a register table name."""
+        if reg_name == "coils":
+            return (self.coils, coerce_bit) if with_coercer else self.coils
+        if reg_name == "discretes":
+            return (self.discretes, coerce_bit) if with_coercer else self.discretes
+        if reg_name == "input_regs":
+            return (self.input_regs, coerce_reg) if with_coercer else self.input_regs
+        if reg_name == "holding_regs":
+            return (self.holding_regs, coerce_reg) if with_coercer else self.holding_regs
+        raise ValueError(f"Unknown register type '{reg_name}'")
 
     @staticmethod
     def _apply_table(buffer: List[int], values: List[Any] | None, coercer, name: str) -> None:
@@ -174,3 +204,13 @@ def coerce_reg(value: Any) -> int:
         if 0 <= value <= 0xFFFF:
             return value
     raise ValueError(f"Invalid register value: {value!r}")
+
+
+def crc16_modbus_words(lo: int, hi: int) -> int:
+    """Compute CRC16 (Modbus) over two 16-bit words (lo, hi)."""
+    crc = 0xFFFF
+    for byte in (lo & 0xFF, (lo >> 8) & 0xFF, hi & 0xFF, (hi >> 8) & 0xFF):
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if (crc & 1) else (crc >> 1)
+    return crc & 0xFFFF

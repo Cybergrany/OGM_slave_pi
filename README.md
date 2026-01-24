@@ -16,10 +16,10 @@ registers over a local Unix socket for other programs on the Pi.
 
 ## Installation (Pi)
 
-1) **Install system dependencies** (libmodbus runtime + headers):
+1) **Install system dependencies** (libmodbus runtime + headers + libgpiod bindings):
 ```bash
 sudo apt-get update
-sudo apt-get install -y libmodbus libmodbus-dev
+sudo apt-get install -y libmodbus libmodbus-dev python3-libgpiod
 ```
 
 2) **Create a virtualenv and install Python deps**:
@@ -41,17 +41,33 @@ python3 scripts/export_pinmap.py --address 99 --output out/pinmap_99.json
 Notes:
 - Use `--name <board_name>` instead of `--address` if you prefer names.
 - Use `--skip-external` to ignore boards marked `external_management: true`.
+- For bridge children, use `--child-name`/`--child-address` and optionally `--bridge-name`:
+  `python3 scripts/export_pinmap.py --child-name slave_pi --bridge-name bridge_console --output out/pinmap_slave_pi.json`
 
-5) **Run the daemon**:
+5) **Configure the daemon**:
+
+Edit `config/ogm_pi.yaml` (or `/etc/ogm_pi/ogm_pi.yaml` if using systemd) to set the
+pinmap path and serial settings.
+
+Example:
+```yaml
+pinmap: /etc/ogm_pi/pinmap.json
+serial: /dev/ttyUSB0
+baud: 250000
+slave_address: 99
+gpio_chip: /dev/gpiochip0
+```
+
+6) **Run the daemon**:
 ```bash
-python3 -m ogm_pi.daemon \
-  --pinmap out/pinmap_99.json \
-  --serial /dev/ttyUSB0 \
-  --baud 250000 \
-  --slave-address 99
+python3 -m ogm_pi.daemon --config config/ogm_pi.yaml
 ```
 If you only want IPC (no Modbus backend), add `--no-modbus`.
 Optional serial settings: `--parity`, `--data-bits`, `--stop-bits`.
+GPIO example (BCM numbering via libgpiod):
+```bash
+python3 -m ogm_pi.daemon --config config/ogm_pi.yaml
+```
 
 ## IPC usage (Unix socket)
 
@@ -131,13 +147,47 @@ your system.
 sudo cp systemd/ogm_pi.socket /etc/systemd/system/
 sudo cp systemd/ogm_pi.service /etc/systemd/system/
 
-# Edit the service to point at your pinmap and serial device.
+# Edit /etc/ogm_pi/ogm_pi.yaml to point at your pinmap and serial device.
 sudo systemctl daemon-reload
 sudo systemctl enable --now ogm_pi.socket
 ```
 
 The socket unit controls permissions via `SocketMode` and `SocketGroup`.
 Add your client user to that group to allow IPC access.
+
+## Install script (Pi)
+
+```bash
+sudo ./scripts/install_pi.sh --board-name slave_pi --slave-address 99 --serial /dev/ttyUSB0
+```
+
+This installs OS deps, creates the service user, copies the repo to `/opt/OGM_slave_pi`,
+installs the venv, writes `/etc/ogm_pi/ogm_pi.yaml`, exports a pinmap to
+`/etc/ogm_pi/pinmap.json`, and enables systemd units.
+
+Common variations:
+
+```bash
+# Bridge child pinmap (under bridge_console)
+sudo ./scripts/install_pi.sh --child-name slave_pi --bridge-name bridge_console --slave-address 99
+
+# Use a prebuilt pinmap
+sudo ./scripts/install_pi.sh --pinmap-src /path/to/pinmap.json --write-pinmap
+
+# Update install in place (preserve config/pinmap)
+sudo ./scripts/install_pi.sh --update
+
+# Remove units (keep config + install)
+sudo ./scripts/install_pi.sh --uninstall
+
+# Remove units and purge install/config dirs
+sudo ./scripts/install_pi.sh --uninstall --purge
+```
+
+`--write-config` (or any config override flag) rewrites `ogm_pi.yaml` using defaults.
+Use `--skip-apt`/`--skip-pip` for offline installs and `--skip-systemd` to avoid
+touching systemd. If you change `--target-dir`, `--config-dir`, or `--socket-path`,
+the installer writes matching systemd units.
 
 ## Pinmap JSON schema (v1)
 
@@ -161,7 +211,29 @@ future scripts can add semantics if needed.
 
 ## Notes / gotchas
 
-- `PIN_HASH` uses input registers: low word first, high word second.
+- `PIN_HASH` uses input registers: low word first, high word second, CRC16 third. Bridge children use `child_hash_<child_name>` for the hash pin name.
 - Pin order matters for register layout; do not reorder YAML entries.
 - Modbus writes should only target coils/holding regs, but IPC can write all.
-- Bridge child support is planned but not implemented yet (boards only).
+- Bridge child pinmaps are supported, but OGM_slave_pi itself remains a single Modbus slave (it does not act as a bridge).
+- If a pin is named `pi_cpu_temp_c_x100` or `pi_cpu_load_1m_x100`, the daemon will populate it from system metrics.
+- BOARD_STATS uptime uses the daemon service lifetime (resets on service restart).
+
+## Example Raspberry Pi board entry
+
+```yaml
+- name: slave_pi
+  address: 99
+  zone: 0
+  external_management: true
+  has_stats: true
+  reset_on_init: true
+  pins:
+    # Use Raspberry Pi BCM GPIO numbering.
+    - { name: pi_input_1,  type: INPUT_DIGITAL,  pin: 17 }
+    - { name: pi_input_2,  type: INPUT_DIGITAL,  pin: 27 }
+    - { name: pi_output_1, type: OUTPUT_DIGITAL, pin: 22, args: [0] }
+    - { name: pi_output_2, type: OUTPUT_DIGITAL, pin: 23, args: [0] }
+    - { name: pi_cpu_temp_c_x100,  type: PLAIN_INPUT_REG, args: [0] }    # centigrade * 100
+    - { name: pi_cpu_load_1m_x100, type: PLAIN_INPUT_REG, args: [0] }    # load avg * 100
+    - { name: RESET, type: BOARD_RESET, pin: 0 }
+```

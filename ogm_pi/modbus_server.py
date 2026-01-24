@@ -330,6 +330,7 @@ class LibModbusBackend(ModbusBackend):
         data_bits: int = 8,
         stop_bits: int = 1,
         event_sink: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+        error_handler: Optional[Callable[[Exception], None]] = None,
     ) -> None:
         self._store = store
         self._pinmap = pinmap
@@ -344,6 +345,7 @@ class LibModbusBackend(ModbusBackend):
         self._stop_event = threading.Event()
         self._tracker = ChangeTracker(pinmap)
         self._event_sink = event_sink
+        self._error_handler = error_handler
 
     def start(self) -> None:
         totals = {
@@ -388,6 +390,11 @@ class LibModbusBackend(ModbusBackend):
                     self._event_sink(changes.events)
             except Exception as exc:
                 LOGGER.exception("Modbus backend error: %s", exc)
+                if self._error_handler is not None:
+                    try:
+                        self._error_handler(exc)
+                    except Exception:
+                        LOGGER.exception("Modbus error handler failed")
                 break
 
 
@@ -402,6 +409,7 @@ def create_backend(
     stop_bits: int = 1,
     disabled: bool = False,
     event_sink: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+    error_handler: Optional[Callable[[Exception], None]] = None,
 ) -> ModbusBackend:
     """Factory for the Modbus backend (null backend when disabled)."""
     if disabled:
@@ -416,4 +424,5 @@ def create_backend(
         data_bits,
         stop_bits,
         event_sink=event_sink,
+        error_handler=error_handler,
     )
