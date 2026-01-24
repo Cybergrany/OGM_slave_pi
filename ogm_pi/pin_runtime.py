@@ -174,6 +174,10 @@ class PinHandler:
     def reset(self) -> None:
         return
 
+    def force_safe(self) -> None:
+        """Force a safe output state if applicable."""
+        return
+
 
 class PlainCoil(PinHandler):
     def __init__(self, pin: PinRecord, store: RegisterStore, runtime: "PinRuntime") -> None:
@@ -343,6 +347,75 @@ class OutputDigital(PinHandler):
         self._last = None
         self.update(time.monotonic())
 
+    def force_safe(self) -> None:
+        if self._line is None:
+            return
+        self.coil.reset()
+        safe_val = bool(self.coil.initial)
+        self._last = safe_val
+        self.runtime.gpio.write(self._line, safe_val)
+
+
+class OutputDigitalAutoRelease(PinHandler):
+    def __init__(self, pin: PinRecord, store: RegisterStore, runtime: "PinRuntime") -> None:
+        super().__init__(pin, store, runtime)
+        self.coil = RegHandle(store, "coils", pin.coils, 0)
+        self._line = _resolve_gpio_line(pin.pin)
+        self._last = None
+        self._last_change = 0.0
+        self._release_ms = self._parse_release_ms(pin.args)
+
+    @staticmethod
+    def _parse_release_ms(args: List[Any]) -> int:
+        if not args:
+            return 0
+        try:
+            return max(0, int(args[-1]))
+        except (TypeError, ValueError):
+            return 0
+
+    def init(self) -> None:
+        if self._line is None:
+            LOGGER.warning("OutputDigitalAutoRelease %s has unsupported pin %r", self.pin.name, self.pin.pin)
+            return
+        self.runtime.gpio.setup_output(self._line, False)
+        self.coil.reset()
+        self._last = bool(self.coil.get())
+        self.runtime.gpio.write(self._line, self._last)
+        self._last_change = time.monotonic()
+
+    def update(self, now: float) -> None:
+        if self._line is None:
+            return
+        value = bool(self.coil.get())
+        if self._last is None or value != self._last:
+            self._last = value
+            self.runtime.gpio.write(self._line, value)
+            if value:
+                self._last_change = now
+
+        if self._last and self._release_ms > 0:
+            if (now - self._last_change) * 1000.0 >= self._release_ms:
+                self.coil.set(0)
+                self._last = False
+                self.runtime.gpio.write(self._line, False)
+                self._last_change = now
+
+    def reset(self) -> None:
+        if self._line is None:
+            return
+        self.coil.reset()
+        self._last = bool(self.coil.get())
+        self.runtime.gpio.write(self._line, self._last)
+        self._last_change = time.monotonic()
+
+    def force_safe(self) -> None:
+        if self._line is None:
+            return
+        self.coil.set(0)
+        self._last = False
+        self.runtime.gpio.write(self._line, False)
+
 
 class BoardReset(PinHandler):
     def __init__(self, pin: PinRecord, store: RegisterStore, runtime: "PinRuntime") -> None:
@@ -420,6 +493,7 @@ HANDLER_TYPES = {
     "PIN_HASH": PinHash,
     "INPUT_DIGITAL": InputDigital,
     "OUTPUT_DIGITAL": OutputDigital,
+    "OUTPUT_DIGITAL_AUTO_RELEASE": OutputDigitalAutoRelease,
     "BOARD_RESET": BoardReset,
     "BOARD_STATS": BoardStats,
 }
@@ -471,6 +545,16 @@ class PinRuntime:
             else:
                 handler = handler_cls(pin, self.store, self)
             self._handlers.append(handler)
+
+    def force_safe_outputs(self, reason: str = "") -> None:
+        """Force all output pins to their safe state."""
+        if reason:
+            LOGGER.warning("Forcing outputs to safe state (%s)", reason)
+        for handler in self._handlers:
+            try:
+                handler.force_safe()
+            except Exception as exc:
+                LOGGER.exception("Failed to set safe output (%s): %s", handler.pin.name, exc)
 
     def start(self) -> None:
         for handler in self._handlers:

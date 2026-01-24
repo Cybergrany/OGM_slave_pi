@@ -1,0 +1,15 @@
+# OGM_slave_pi daemon configuration
+pinmap: /etc/ogm_pi/pinmap.json
+serial: /dev/ttyUSB0
+baud: 250000
+parity: N
+data_bits: 8
+stop_bits: 1
+slave_address: 99
+socket_path: /run/ogm_pi.sock
+no_modbus: false
+no_gpio: false
+gpio_chip: /dev/gpiochip0
+pin_poll_ms: 20
+stats_interval: 5.0
+log_level: INFO

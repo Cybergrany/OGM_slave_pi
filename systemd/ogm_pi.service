@@ -10,8 +10,21 @@ User=ogm_pi
 Group=ogm
 WorkingDirectory=/opt/OGM_slave_pi
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 -m ogm_pi.daemon --pinmap /etc/ogm_pi/pinmap.json --serial /dev/ttyUSB0 --baud 250000 --slave-address 99
-Restart=on-failure
+ExecStart=/opt/OGM_slave_pi/.venv/bin/python -m ogm_pi.daemon --config /etc/ogm_pi/ogm_pi.yaml
+Restart=always
+RestartSec=2
+StartLimitIntervalSec=60
+StartLimitBurst=5
+TimeoutStopSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SupplementaryGroups=gpio,dialout
 
 [Install]
 WantedBy=multi-user.target

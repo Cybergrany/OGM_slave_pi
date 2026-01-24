@@ -44,26 +44,29 @@ Notes:
 - For bridge children, use `--child-name`/`--child-address` and optionally `--bridge-name`:
   `python3 scripts/export_pinmap.py --child-name slave_pi --bridge-name bridge_console --output out/pinmap_slave_pi.json`
 
-5) **Run the daemon**:
+5) **Configure the daemon**:
+
+Edit `config/ogm_pi.yaml` (or `/etc/ogm_pi/ogm_pi.yaml` if using systemd) to set the
+pinmap path and serial settings.
+
+Example:
+```yaml
+pinmap: /etc/ogm_pi/pinmap.json
+serial: /dev/ttyUSB0
+baud: 250000
+slave_address: 99
+gpio_chip: /dev/gpiochip0
+```
+
+6) **Run the daemon**:
 ```bash
-python3 -m ogm_pi.daemon \
-  --pinmap out/pinmap_99.json \
-  --serial /dev/ttyUSB0 \
-  --baud 250000 \
-  --slave-address 99
+python3 -m ogm_pi.daemon --config config/ogm_pi.yaml
 ```
 If you only want IPC (no Modbus backend), add `--no-modbus`.
 Optional serial settings: `--parity`, `--data-bits`, `--stop-bits`.
 GPIO example (BCM numbering via libgpiod):
 ```bash
-python3 -m ogm_pi.daemon \
-  --pinmap out/pinmap_99.json \
-  --serial /dev/ttyUSB0 \
-  --baud 250000 \
-  --slave-address 99 \
-  --gpio-chip /dev/gpiochip0 \
-  --pin-poll-ms 20 \
-  --stats-interval 5
+python3 -m ogm_pi.daemon --config config/ogm_pi.yaml
 ```
 
 ## IPC usage (Unix socket)
@@ -144,13 +147,22 @@ your system.
 sudo cp systemd/ogm_pi.socket /etc/systemd/system/
 sudo cp systemd/ogm_pi.service /etc/systemd/system/
 
-# Edit the service to point at your pinmap and serial device.
+# Edit /etc/ogm_pi/ogm_pi.yaml to point at your pinmap and serial device.
 sudo systemctl daemon-reload
 sudo systemctl enable --now ogm_pi.socket
 ```
 
 The socket unit controls permissions via `SocketMode` and `SocketGroup`.
 Add your client user to that group to allow IPC access.
+
+## Install script (Pi)
+
+```bash
+sudo ./scripts/install_pi.sh
+```
+
+This installs OS deps, creates the service user, copies the repo to `/opt/OGM_slave_pi`,
+installs the venv, writes `/etc/ogm_pi/ogm_pi.yaml`, and enables systemd units.
 
 ## Pinmap JSON schema (v1)
 
@@ -179,6 +191,7 @@ future scripts can add semantics if needed.
 - Modbus writes should only target coils/holding regs, but IPC can write all.
 - Bridge child pinmaps are supported, but OGM_slave_pi itself remains a single Modbus slave (it does not act as a bridge).
 - If a pin is named `pi_cpu_temp_c_x100` or `pi_cpu_load_1m_x100`, the daemon will populate it from system metrics.
+- BOARD_STATS uptime uses the daemon service lifetime (resets on service restart).
 
 ## Example Raspberry Pi board entry
 
