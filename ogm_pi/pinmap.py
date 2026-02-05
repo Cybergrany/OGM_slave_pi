@@ -64,6 +64,10 @@ class PinMap:
                 input_regs=_span(entry.get("input_regs")),
                 holding_regs=_span(entry.get("holding_regs")),
             )
+            if record.type == "PIN_HASH" and record.input_regs.count != 2:
+                raise ValueError(
+                    f"PIN_HASH pin '{record.name}' must use exactly 2 input_regs, got {record.input_regs.count}"
+                )
             if record.name in pins_by_name:
                 raise ValueError(f"Duplicate pin name '{record.name}' in pinmap")
             pins.append(record)

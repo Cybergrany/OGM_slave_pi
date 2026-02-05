@@ -7,9 +7,12 @@ reading/writing by pin spans.
 from __future__ import annotations
 
 from typing import Any, Dict, List
+import logging
 import threading
 
 from .pinmap import PinMap, PinRecord, RegSpan
+
+LOGGER = logging.getLogger(__name__)
 
 
 class RegisterStore:
@@ -104,16 +107,19 @@ class RegisterStore:
                     break
         if pin is None:
             return
-        if pin.input_regs.count < 3:
+        if pin.input_regs.count != 2:
+            LOGGER.warning(
+                "PIN_HASH pin '%s' must use exactly 2 input regs (got %s); skipping hash seed",
+                pin.name or "<unnamed>",
+                pin.input_regs.count,
+            )
             return
         value = int(pinmap.hash) & 0xFFFFFFFF
         lo = value & 0xFFFF
         hi = (value >> 16) & 0xFFFF
-        crc = crc16_modbus_words(lo, hi)
         with self._lock:
             self.input_regs[pin.input_regs.start] = lo
             self.input_regs[pin.input_regs.start + 1] = hi
-            self.input_regs[pin.input_regs.start + 2] = crc
 
     @staticmethod
     def _read_span(buffer: List[int], span: RegSpan) -> List[int]:
