@@ -276,7 +276,7 @@ from `ogm_pi.pin_runtime`.
 
 ## Notes / gotchas
 
-- `PIN_HASH` uses input registers: low word first, high word second, CRC16 third. Bridge children use `child_hash_<child_name>` for the hash pin name.
+- `PIN_HASH` uses two input registers: low word first, high word second. Bridge children use `child_hash_<child_name>` for the hash pin name.
 - Pin order matters for register layout; do not reorder YAML entries.
 - Modbus writes should only target coils/holding regs, but IPC can write all.
 - Bridge child pinmaps are supported, but OGM_slave_pi itself remains a single Modbus slave (it does not act as a bridge).
