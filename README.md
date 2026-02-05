@@ -52,6 +52,7 @@ pinmap path and serial settings.
 Example:
 ```yaml
 pinmap: /etc/ogm_pi/pinmap.json
+custom_types_dir: /opt/OGM_slave_pi/custom_types
 serial: /dev/ttyUSB0
 baud: 250000
 slave_address: 99
@@ -188,6 +189,8 @@ sudo ./scripts/install_pi.sh --uninstall --purge
 Use `--skip-apt`/`--skip-pip` for offline installs and `--skip-systemd` to avoid
 touching systemd. If you change `--target-dir`, `--config-dir`, or `--socket-path`,
 the installer writes matching systemd units.
+Custom handler modules default to `<target-dir>/custom_types`; override with
+`--custom-types-dir` if needed.
 
 ## Pinmap JSON schema (v1)
 
@@ -208,6 +211,25 @@ Each pin record:
 `pin` may be an int or a string token (e.g., `A0`). `args` is always an
 array (empty if none) and is passed through without interpretation so
 future scripts can add semantics if needed.
+
+## Custom pin handlers
+
+`ogm_pi` can load custom runtime handlers from a directory of Python modules.
+
+- Config key: `custom_types_dir` (CLI override: `--custom-types-dir`)
+- Default when unset: `<install-root>/custom_types` (for example `/opt/OGM_slave_pi/custom_types`)
+- Each module may export:
+  - `HANDLER_TYPES = {"PIN_TYPE_NAME": HandlerClass, ...}`
+  - `METRIC_INPUT_REGS = {"pin_name": MetricHandlerClass, ...}` (optional)
+
+Handler classes should follow the built-in `PinHandler` interface
+(`init`, `update`, `reset`, optional `force_safe`), and can import helpers
+from `ogm_pi.pin_runtime`.
+
+`ogm_pi` fails startup if:
+- `custom_types_dir` is configured but missing
+- a custom module fails to import
+- custom handler/metric names collide with built-ins or each other
 
 ## Notes / gotchas
 
