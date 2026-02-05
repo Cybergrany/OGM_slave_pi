@@ -28,6 +28,7 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_CONFIG_PATH = "/etc/ogm_pi/ogm_pi.yaml"
 DEFAULT_SETTINGS = {
     "pinmap": None,
+    "custom_types_dir": None,
     "serial": "/dev/ttyUSB0",
     "baud": 250000,
     "parity": "N",
@@ -49,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="OGM_slave_pi Modbus RTU + IPC daemon", argument_default=argparse.SUPPRESS)
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="Path to daemon config YAML")
     parser.add_argument("--pinmap", help="Path to exported pinmap JSON")
+    parser.add_argument("--custom-types-dir", help="Path to custom pin handler modules")
     parser.add_argument("--serial", help="Serial device for Modbus RTU")
     parser.add_argument("--baud", type=int, help="Modbus RTU baud rate")
     parser.add_argument("--parity", help="Serial parity (N/E/O)")
@@ -114,6 +116,11 @@ def main() -> int:
     store = RegisterStore(pinmap.totals)
     store.seed_pin_hash(pinmap)
 
+    custom_types_dir = settings.get("custom_types_dir")
+    if custom_types_dir in (None, ""):
+        default_custom_dir = Path(__file__).resolve().parents[1] / "custom_types"
+        custom_types_dir = str(default_custom_dir) if default_custom_dir.exists() else None
+
     server = IPCServer(store, pinmap, str(settings["socket_path"]))
 
     if settings.get("no_gpio"):
@@ -131,6 +138,7 @@ def main() -> int:
         gpio,
         poll_interval=max(int(settings.get("pin_poll_ms", 20)), 1) / 1000.0,
         stats_interval=max(float(settings.get("stats_interval", 5.0)), 0.5),
+        custom_types_dir=custom_types_dir,
     )
     runtime.start()
 

@@ -28,6 +28,7 @@ Config overrides:
   --stop-bits N             Serial stop bits (default: 1)
   --slave-address ADDR      Override Modbus slave address
   --socket-path PATH        IPC socket path (default: /run/ogm_pi.sock)
+  --custom-types-dir PATH   Custom pin handler dir (default: <target-dir>/custom_types)
   --gpio-chip PATH          GPIO chip path (default: /dev/gpiochip0)
   --no-modbus               Disable Modbus backend
   --no-gpio                 Disable GPIO access
@@ -78,6 +79,7 @@ STOP_BITS="1"
 SLAVE_ADDRESS=""
 SOCKET_PATH="/run/ogm_pi.sock"
 GPIO_CHIP="/dev/gpiochip0"
+CUSTOM_TYPES_DIR=""
 NO_MODBUS="false"
 NO_GPIO="false"
 PIN_POLL_MS="20"
@@ -94,6 +96,7 @@ PURGE="false"
 
 CONFIG_OVERRIDES="false"
 PINMAP_REQUESTED="false"
+CUSTOM_TYPES_OVERRIDE="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -117,6 +120,7 @@ while [[ $# -gt 0 ]]; do
     --stop-bits) STOP_BITS="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
     --slave-address) SLAVE_ADDRESS="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
     --socket-path) SOCKET_PATH="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
+    --custom-types-dir) CUSTOM_TYPES_DIR="$2"; CUSTOM_TYPES_OVERRIDE="true"; CONFIG_OVERRIDES="true"; shift 2 ;;
     --gpio-chip) GPIO_CHIP="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
     --no-modbus) NO_MODBUS="true"; CONFIG_OVERRIDES="true"; shift ;;
     --no-gpio) NO_GPIO="true"; CONFIG_OVERRIDES="true"; shift ;;
@@ -162,6 +166,9 @@ fi
 
 CONFIG_FILE="${CONFIG_DIR}/ogm_pi.yaml"
 PINMAP_FILE="${CONFIG_DIR}/pinmap.json"
+if [[ "$CUSTOM_TYPES_OVERRIDE" != "true" ]]; then
+  CUSTOM_TYPES_DIR="${TARGET_DIR}/custom_types"
+fi
 
 ensure_group_user() {
   getent group ogm >/dev/null || groupadd ogm
@@ -222,6 +229,7 @@ data_bits: ${DATA_BITS}
 stop_bits: ${STOP_BITS}
 slave_address: ${slave_line}
 socket_path: ${SOCKET_PATH}
+custom_types_dir: ${CUSTOM_TYPES_DIR}
 no_modbus: ${NO_MODBUS}
 no_gpio: ${NO_GPIO}
 gpio_chip: ${GPIO_CHIP}
@@ -373,6 +381,7 @@ else
   fi
   cp -a "$ROOT_DIR/." "$TARGET_DIR/"
 fi
+mkdir -p "$CUSTOM_TYPES_DIR"
 
 if [[ "$SKIP_PIP" != "true" ]]; then
   if [[ ! -d "${TARGET_DIR}/.venv" ]]; then
@@ -395,6 +404,9 @@ if [[ "$WRITE_PINMAP" == "true" || "$PINMAP_REQUESTED" == "true" ]]; then
 fi
 
 chown -R ogm_pi:ogm "$TARGET_DIR"
+if [[ -d "$CUSTOM_TYPES_DIR" ]]; then
+  chown -R ogm_pi:ogm "$CUSTOM_TYPES_DIR"
+fi
 if [[ -f "$CONFIG_FILE" ]]; then
   chown ogm_pi:ogm "$CONFIG_FILE"
   chmod 0640 "$CONFIG_FILE"

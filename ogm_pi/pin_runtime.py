@@ -8,6 +8,7 @@ import logging
 import threading
 import time
 
+from .custom_loader import load_custom_handlers
 from .gpio import GpioAdapter, NullGpioAdapter
 from .pinmap import PinMap, PinRecord, RegSpan
 from .store import RegisterStore, crc16_modbus_words
@@ -514,6 +515,7 @@ class PinRuntime:
         gpio: Optional[GpioAdapter] = None,
         poll_interval: float = 0.02,
         stats_interval: float = 5.0,
+        custom_types_dir: Optional[str] = None,
     ) -> None:
         self.pinmap = pinmap
         self.store = store
@@ -521,22 +523,35 @@ class PinRuntime:
         self._poll_interval = poll_interval
         self._stats_interval = stats_interval
         self._handlers: List[PinHandler] = []
+        self._handler_types = dict(HANDLER_TYPES)
+        self._metric_input_regs = dict(METRIC_INPUT_REGS)
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._start_time = time.monotonic()
         self._last_reset_time = self._start_time
         self._reset_lock = threading.Lock()
+        custom_handlers, custom_metrics = load_custom_handlers(
+            custom_types_dir,
+            built_in_handlers=self._handler_types.keys(),
+            built_in_metrics=self._metric_input_regs.keys(),
+        )
+        if custom_handlers:
+            LOGGER.info("Loaded %s custom handler type(s)", len(custom_handlers))
+            self._handler_types.update(custom_handlers)
+        if custom_metrics:
+            LOGGER.info("Loaded %s custom metric pin binding(s)", len(custom_metrics))
+            self._metric_input_regs.update(custom_metrics)
         self._build_handlers()
 
     def _build_handlers(self) -> None:
         for pin in self.pinmap.pins:
-            metric_cls = METRIC_INPUT_REGS.get(pin.name)
+            metric_cls = self._metric_input_regs.get(pin.name)
             if metric_cls is not None:
                 if pin.type not in ("PLAIN_INPUT_REG", "INPUT_REG"):
                     LOGGER.warning("Metric pin %s should use PLAIN_INPUT_REG (found %s)", pin.name, pin.type)
                 self._handlers.append(metric_cls(pin, self.store, self))
                 continue
-            handler_cls = HANDLER_TYPES.get(pin.type)
+            handler_cls = self._handler_types.get(pin.type)
             if handler_cls is None:
                 LOGGER.debug("Skipping unsupported pin type %s (%s)", pin.type, pin.name)
                 continue
