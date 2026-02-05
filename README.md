@@ -11,8 +11,23 @@ registers over a local Unix socket for other programs on the Pi.
 - `config/PinTraits.yaml`: master register footprint definitions.
 - `config/CustomSlaveDefines/PinTraits.yaml`: custom pin footprints.
 - `scripts/export_pinmap.py`: YAML -> pinmap JSON exporter.
+- `scripts/install_pi.sh`: installer/update script with UART preflight/fix support.
 - `ogm_pi/`: daemon + IPC client modules.
+- `ogm_pi/custom_loader.py`: dynamic loader for custom runtime pin handlers.
 - `systemd/`: example units for a root-owned socket and user-owned service.
+
+## Recommended deploy flow (from OGM_The_Core)
+
+For production deployments, use:
+
+```bash
+cd /path/to/OGM_The_Core
+python3 scripts/deploy_slave_pi.py
+```
+
+That helper exports pinmaps from master source-of-truth files, bundles custom
+Pi pin handlers from `OGM_The_Core/Defines/CustomSlaveDefines/slave_pi`,
+uploads the runtime/config payload to the Pi, and runs install or sync actions.
 
 ## Installation (Pi)
 
@@ -29,7 +44,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-3) **Copy/refresh config files** (manual for now):
+3) **Copy/refresh config files** (manual workflow):
 - Update `config/ExternalIODefines.yaml` from `OGM_The_Core/Defines/ExternalIODefines.yaml`.
 - Update `config/PinTraits.yaml` from `OGM_Portable/Defines/PinTraits.yaml`.
 - Update `config/CustomSlaveDefines/PinTraits.yaml` from `OGM_The_Core/Defines/CustomSlaveDefines/PinTraits.yaml`.
@@ -53,11 +68,12 @@ Example:
 ```yaml
 pinmap: /etc/ogm_pi/pinmap.json
 custom_types_dir: /opt/OGM_slave_pi/custom_types
-serial: /dev/ttyUSB0
+serial: /dev/serial0
 baud: 250000
 slave_address: 99
 gpio_chip: /dev/gpiochip0
 ```
+For USB adapters instead of GPIO14/15 UART, use `serial: /dev/ttyUSB0` (or your adapter path).
 
 6) **Run the daemon**:
 ```bash
@@ -159,7 +175,7 @@ Add your client user to that group to allow IPC access.
 ## Install script (Pi)
 
 ```bash
-sudo ./scripts/install_pi.sh --board-name slave_pi --slave-address 99 --serial /dev/ttyUSB0
+sudo ./scripts/install_pi.sh --board-name slave_pi --slave-address 99
 ```
 
 This installs OS deps, creates the service user, copies the repo to `/opt/OGM_slave_pi`,
@@ -173,6 +189,12 @@ If accepted (default), it uses `/dev/serial0` and applies UART compatibility
 checks/fixes (`--uart-fix`) for better Modbus RTU reliability on Pi UART pins.
 Use `--no-default-install-config` and/or `--no-uart-fix` to opt out.
 
+UART preflight/fix behavior (for `/dev/serial*`, `/dev/ttyAMA*`, `/dev/ttyS*`):
+- Reports resolved UART mapping (`readlink -f`), serial-getty status, and cmdline serial console state.
+- With `--uart-fix` (default), applies compatibility updates (enable UART, disable serial console/getty, disable bt UART service).
+- If UART boot settings are changed, installer marks reboot required, enables units, and skips immediate service restart.
+- Hard-fails if parity `E/O` is requested while selected UART resolves to `ttyS*` (mini UART).
+
 Common variations:
 
 ```bash
@@ -184,6 +206,12 @@ sudo ./scripts/install_pi.sh --pinmap-src /path/to/pinmap.json --write-pinmap
 
 # Update install in place (preserve config/pinmap)
 sudo ./scripts/install_pi.sh --update
+
+# Non-interactive install using default GPIO14/15 profile
+sudo ./scripts/install_pi.sh --default-install-config --board-name slave_pi --slave-address 99
+
+# USB RS485 adapter install (skip default GPIO14/15 profile prompt/settings)
+sudo ./scripts/install_pi.sh --no-default-install-config --serial /dev/ttyUSB0 --board-name slave_pi --slave-address 99
 
 # Remove units (keep config + install)
 sudo ./scripts/install_pi.sh --uninstall
@@ -237,6 +265,14 @@ from `ogm_pi.pin_runtime`.
 - `custom_types_dir` is configured but missing
 - a custom module fails to import
 - custom handler/metric names collide with built-ins or each other
+
+## Custom type workflow example (TM1637)
+
+- Add/maintain trait footprint in `OGM_The_Core/Defines/CustomSlaveDefines/PinTraits.yaml`.
+- Add runtime module in `OGM_The_Core/Defines/CustomSlaveDefines/slave_pi/` exporting `HANDLER_TYPES`.
+- Use pin entries in `ExternalIODefines.yaml` with matching type and args.
+  For `segmentDisplay_tm1637`: `args: [clk_gpio, dio_gpio, optional_boot_test_ms]`.
+- Deploy using `OGM_The_Core/scripts/deploy_slave_pi.py` so custom handler files are synced to the Pi runtime.
 
 ## Notes / gotchas
 
