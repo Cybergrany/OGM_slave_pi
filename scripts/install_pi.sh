@@ -21,7 +21,7 @@ Pinmap selection (one of):
   --pinmap-src PATH         Copy an existing pinmap JSON instead of generating
 
 Config overrides:
-  --serial PATH             Modbus serial device (default: /dev/ttyUSB0)
+  --serial PATH             Modbus serial device (base default: /dev/ttyUSB0; default profile uses /dev/serial0)
   --baud BAUD               Modbus baud (default: 250000)
   --parity N|E|O            Modbus parity (default: N)
   --data-bits N             Serial data bits (default: 8)
@@ -30,6 +30,11 @@ Config overrides:
   --socket-path PATH        IPC socket path (default: /run/ogm_pi.sock)
   --custom-types-dir PATH   Custom pin handler dir (default: <target-dir>/custom_types)
   --gpio-chip PATH          GPIO chip path (default: /dev/gpiochip0)
+  --default-install-config  Use default GPIO14/15 RS485 config (serial0 + uart-fix)
+  --no-default-install-config
+                            Skip default GPIO14/15 RS485 config prompt
+  --uart-fix                Apply UART compatibility fixes/checks (default)
+  --no-uart-fix             Only report UART status, do not modify boot/console UART settings
   --no-modbus               Disable Modbus backend
   --no-gpio                 Disable GPIO access
   --pin-poll-ms MS          Pin poll interval (default: 20)
@@ -85,6 +90,8 @@ NO_GPIO="false"
 PIN_POLL_MS="20"
 STATS_INTERVAL="5.0"
 LOG_LEVEL="INFO"
+DEFAULT_INSTALL_CONFIG="auto"
+UART_FIX="true"
 
 SKIP_APT="false"
 SKIP_PIP="false"
@@ -97,6 +104,13 @@ PURGE="false"
 CONFIG_OVERRIDES="false"
 PINMAP_REQUESTED="false"
 CUSTOM_TYPES_OVERRIDE="false"
+SERIAL_SET="false"
+BAUD_SET="false"
+PARITY_SET="false"
+DATA_BITS_SET="false"
+STOP_BITS_SET="false"
+UART_REBOOT_REQUIRED="false"
+UART_FIX_APPLIED="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -113,15 +127,19 @@ while [[ $# -gt 0 ]]; do
     --bridge-address) BRIDGE_ADDRESS="$2"; shift 2 ;;
     --pinmap-src) PINMAP_SRC="$2"; PINMAP_REQUESTED="true"; shift 2 ;;
 
-    --serial) SERIAL="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
-    --baud) BAUD="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
-    --parity) PARITY="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
-    --data-bits) DATA_BITS="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
-    --stop-bits) STOP_BITS="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
+    --serial) SERIAL="$2"; SERIAL_SET="true"; CONFIG_OVERRIDES="true"; shift 2 ;;
+    --baud) BAUD="$2"; BAUD_SET="true"; CONFIG_OVERRIDES="true"; shift 2 ;;
+    --parity) PARITY="$2"; PARITY_SET="true"; CONFIG_OVERRIDES="true"; shift 2 ;;
+    --data-bits) DATA_BITS="$2"; DATA_BITS_SET="true"; CONFIG_OVERRIDES="true"; shift 2 ;;
+    --stop-bits) STOP_BITS="$2"; STOP_BITS_SET="true"; CONFIG_OVERRIDES="true"; shift 2 ;;
     --slave-address) SLAVE_ADDRESS="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
     --socket-path) SOCKET_PATH="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
     --custom-types-dir) CUSTOM_TYPES_DIR="$2"; CUSTOM_TYPES_OVERRIDE="true"; CONFIG_OVERRIDES="true"; shift 2 ;;
     --gpio-chip) GPIO_CHIP="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
+    --default-install-config) DEFAULT_INSTALL_CONFIG="yes"; shift ;;
+    --no-default-install-config) DEFAULT_INSTALL_CONFIG="no"; shift ;;
+    --uart-fix) UART_FIX="true"; shift ;;
+    --no-uart-fix) UART_FIX="false"; shift ;;
     --no-modbus) NO_MODBUS="true"; CONFIG_OVERRIDES="true"; shift ;;
     --no-gpio) NO_GPIO="true"; CONFIG_OVERRIDES="true"; shift ;;
     --pin-poll-ms) PIN_POLL_MS="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
@@ -169,6 +187,230 @@ PINMAP_FILE="${CONFIG_DIR}/pinmap.json"
 if [[ "$CUSTOM_TYPES_OVERRIDE" != "true" ]]; then
   CUSTOM_TYPES_DIR="${TARGET_DIR}/custom_types"
 fi
+
+is_soc_uart_path() {
+  local dev="$1"
+  case "$dev" in
+    /dev/serial[0-9]*|/dev/ttyAMA*|/dev/ttyS*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+resolve_boot_config_path() {
+  if [[ -f /boot/firmware/config.txt ]]; then
+    echo "/boot/firmware/config.txt"
+    return
+  fi
+  if [[ -f /boot/config.txt ]]; then
+    echo "/boot/config.txt"
+    return
+  fi
+  echo ""
+}
+
+resolve_cmdline_path() {
+  if [[ -f /boot/firmware/cmdline.txt ]]; then
+    echo "/boot/firmware/cmdline.txt"
+    return
+  fi
+  if [[ -f /boot/cmdline.txt ]]; then
+    echo "/boot/cmdline.txt"
+    return
+  fi
+  echo ""
+}
+
+ensure_boot_key_value() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  [[ -f "$file" ]] || return
+  local key_re="${key//./\\.}"
+  if grep -Eq "^[[:space:]]*${key_re}[[:space:]]*=" "$file"; then
+    if ! grep -Eq "^[[:space:]]*${key_re}[[:space:]]*=[[:space:]]*${value}[[:space:]]*$" "$file"; then
+      backup_file "$file"
+      sed -i -E "s|^[[:space:]]*${key_re}[[:space:]]*=.*$|${key}=${value}|" "$file"
+      UART_REBOOT_REQUIRED="true"
+      UART_FIX_APPLIED="true"
+      echo "Updated ${key}=${value} in ${file}"
+    fi
+  else
+    backup_file "$file"
+    printf "\n%s=%s\n" "$key" "$value" >> "$file"
+    UART_REBOOT_REQUIRED="true"
+    UART_FIX_APPLIED="true"
+    echo "Added ${key}=${value} to ${file}"
+  fi
+}
+
+ensure_disable_bt_overlay() {
+  local file="$1"
+  [[ -f "$file" ]] || return
+  if grep -Eq "^[[:space:]]*dtoverlay[[:space:]]*=[[:space:]]*disable-bt[[:space:]]*$" "$file"; then
+    return
+  fi
+  backup_file "$file"
+  if grep -Eq "^[[:space:]]*dtoverlay[[:space:]]*=[[:space:]]*miniuart-bt[[:space:]]*$" "$file"; then
+    sed -i -E "s|^[[:space:]]*dtoverlay[[:space:]]*=[[:space:]]*miniuart-bt[[:space:]]*$|dtoverlay=disable-bt|" "$file"
+    echo "Replaced dtoverlay=miniuart-bt with dtoverlay=disable-bt in ${file}"
+  else
+    printf "\ndtoverlay=disable-bt\n" >> "$file"
+    echo "Added dtoverlay=disable-bt to ${file}"
+  fi
+  UART_REBOOT_REQUIRED="true"
+  UART_FIX_APPLIED="true"
+}
+
+remove_serial_console_tokens() {
+  local file="$1"
+  [[ -f "$file" ]] || return
+  local before after
+  before="$(cat "$file")"
+  after="$(printf '%s\n' "$before" \
+    | sed -E 's/(^| )console=(serial0|ttyAMA[0-9]+|ttyS[0-9]+)(,[^ ]*)?//g; s/[[:space:]]+/ /g; s/^ //; s/ $//')"
+  if [[ "$after" != "$before" ]]; then
+    backup_file "$file"
+    printf '%s\n' "$after" > "$file"
+    UART_REBOOT_REQUIRED="true"
+    UART_FIX_APPLIED="true"
+    echo "Removed serial console entries from ${file}"
+  fi
+}
+
+disable_service_if_enabled() {
+  local svc="$1"
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return
+  fi
+  if systemctl is-enabled --quiet "$svc" 2>/dev/null || systemctl is-active --quiet "$svc" 2>/dev/null; then
+    systemctl disable --now "$svc" >/dev/null 2>&1 || true
+    UART_FIX_APPLIED="true"
+    echo "Disabled ${svc}"
+  fi
+}
+
+choose_default_install_config() {
+  if [[ "$DEFAULT_INSTALL_CONFIG" == "auto" ]]; then
+    if [[ -t 0 ]]; then
+      local reply
+      read -r -p "Use default install config for GPIO14/15 RS485 (recommended) [Y/n]: " reply
+      case "${reply,,}" in
+        ""|y|yes) DEFAULT_INSTALL_CONFIG="yes" ;;
+        n|no) DEFAULT_INSTALL_CONFIG="no" ;;
+        *) echo "Invalid response '${reply}', using default: yes"; DEFAULT_INSTALL_CONFIG="yes" ;;
+      esac
+    else
+      DEFAULT_INSTALL_CONFIG="yes"
+    fi
+  fi
+
+  if [[ "$DEFAULT_INSTALL_CONFIG" == "yes" ]]; then
+    echo "Applying default install config for GPIO14/15 RS485."
+    if [[ "$SERIAL_SET" != "true" ]]; then SERIAL="/dev/serial0"; fi
+    if [[ "$BAUD_SET" != "true" ]]; then BAUD="250000"; fi
+    if [[ "$PARITY_SET" != "true" ]]; then PARITY="N"; fi
+    if [[ "$DATA_BITS_SET" != "true" ]]; then DATA_BITS="8"; fi
+    if [[ "$STOP_BITS_SET" != "true" ]]; then STOP_BITS="1"; fi
+  else
+    echo "Skipping default install config."
+  fi
+}
+
+uart_preflight() {
+  if [[ "$NO_MODBUS" == "true" ]]; then
+    echo "UART preflight skipped (Modbus disabled)."
+    return
+  fi
+
+  if ! is_soc_uart_path "$SERIAL"; then
+    echo "UART preflight skipped for non-SoC serial path: ${SERIAL}"
+    return
+  fi
+
+  local serial_target serial0_target boot_cfg cmdline_cfg getty_active cmdline_console parity_upper
+  serial_target="$(readlink -f "$SERIAL" 2>/dev/null || true)"
+  if [[ -z "$serial_target" ]]; then
+    serial_target="$SERIAL"
+  fi
+  serial0_target="$(readlink -f /dev/serial0 2>/dev/null || true)"
+  boot_cfg="$(resolve_boot_config_path)"
+  cmdline_cfg="$(resolve_cmdline_path)"
+  parity_upper="${PARITY^^}"
+  getty_active="no"
+  cmdline_console="no"
+
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-enabled --quiet serial-getty@serial0.service 2>/dev/null \
+      || systemctl is-active --quiet serial-getty@serial0.service 2>/dev/null; then
+      getty_active="yes"
+    fi
+  fi
+
+  if [[ -n "$cmdline_cfg" ]] && grep -Eq '(^| )console=(serial0|ttyAMA[0-9]+|ttyS[0-9]+)' "$cmdline_cfg"; then
+    cmdline_console="yes"
+  fi
+
+  echo "UART preflight report:"
+  echo "  serial config: ${SERIAL} (resolved: ${serial_target})"
+  if [[ -n "$serial0_target" ]]; then
+    echo "  /dev/serial0 -> ${serial0_target}"
+  fi
+  if [[ -n "$boot_cfg" ]]; then
+    echo "  boot config: ${boot_cfg}"
+  else
+    echo "  boot config: not found"
+  fi
+  if [[ -n "$cmdline_cfg" ]]; then
+    echo "  cmdline: ${cmdline_cfg} (serial console present: ${cmdline_console})"
+  else
+    echo "  cmdline: not found"
+  fi
+  echo "  serial-getty@serial0 active/enabled: ${getty_active}"
+
+  if [[ "$UART_FIX" == "true" ]]; then
+    echo "Applying UART compatibility fixes (--uart-fix enabled)..."
+    if command -v raspi-config >/dev/null 2>&1; then
+      raspi-config nonint do_serial_cons 1 || true
+      raspi-config nonint do_serial_hw 0 || true
+    else
+      echo "Warning: raspi-config not found; applying file/service based fixes only."
+    fi
+
+    if [[ -n "$boot_cfg" ]]; then
+      ensure_boot_key_value "$boot_cfg" "enable_uart" "1"
+      ensure_disable_bt_overlay "$boot_cfg"
+    fi
+    if [[ -n "$cmdline_cfg" ]]; then
+      remove_serial_console_tokens "$cmdline_cfg"
+    fi
+    disable_service_if_enabled "serial-getty@serial0.service"
+    disable_service_if_enabled "serial-getty@ttyAMA0.service"
+    disable_service_if_enabled "serial-getty@ttyS0.service"
+    disable_service_if_enabled "hciuart.service"
+
+    serial_target="$(readlink -f "$SERIAL" 2>/dev/null || true)"
+    if [[ -z "$serial_target" ]]; then
+      serial_target="$SERIAL"
+    fi
+  fi
+
+  if [[ "$serial_target" =~ ^/dev/ttyS[0-9]+$ ]]; then
+    echo "Warning: ${SERIAL} currently resolves to mini UART (${serial_target})."
+    if [[ "$parity_upper" != "N" ]]; then
+      echo "ERROR: parity '${PARITY}' requested but mini UART does not support parity. Use PL011 (ttyAMA) or parity N." >&2
+      exit 1
+    fi
+  fi
+
+  if [[ "$serial0_target" == "/dev/ttyAMA10" ]]; then
+    echo "Warning: /dev/serial0 points at ttyAMA10 (debug UART). Confirm your Pi model UART routing before proceeding."
+  fi
+
+  if [[ "$UART_FIX_APPLIED" == "true" ]]; then
+    UART_REBOOT_REQUIRED="true"
+    echo "UART fix changes were applied; reboot is required."
+  fi
+}
 
 ensure_group_user() {
   getent group ogm >/dev/null || groupadd ogm
@@ -313,6 +555,11 @@ systemd_reload_restart() {
   fi
 
   systemctl daemon-reload
+  if [[ "$UART_REBOOT_REQUIRED" == "true" ]]; then
+    systemctl enable ogm_pi.socket ogm_pi.service
+    echo "Skipping ogm_pi start/restart until reboot (UART settings changed)."
+    return
+  fi
   systemctl enable --now ogm_pi.socket
   systemctl restart ogm_pi.socket
   systemctl restart ogm_pi.service
@@ -353,6 +600,9 @@ if [[ "$MODE" == "uninstall" ]]; then
   echo "Uninstalled ogm_pi systemd units."
   exit 0
 fi
+
+choose_default_install_config
+uart_preflight
 
 if [[ "$SKIP_APT" != "true" ]]; then
   apt-get update
@@ -427,4 +677,8 @@ systemd_reload_restart
 echo "Installed OGM_slave_pi to ${TARGET_DIR}"
 echo "Config: ${CONFIG_FILE}"
 echo "Pinmap: ${PINMAP_FILE}"
+if [[ "$UART_REBOOT_REQUIRED" == "true" ]]; then
+  echo "UART updates were applied. Reboot before using Modbus on ${SERIAL}."
+  echo "After reboot: sudo systemctl restart ogm_pi.socket ogm_pi.service"
+fi
 echo "Next: edit config/pinmap as needed, then run 'systemctl status ogm_pi.service'"

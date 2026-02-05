@@ -166,6 +166,13 @@ This installs OS deps, creates the service user, copies the repo to `/opt/OGM_sl
 installs the venv, writes `/etc/ogm_pi/ogm_pi.yaml`, exports a pinmap to
 `/etc/ogm_pi/pinmap.json`, and enables systemd units.
 
+By default, the installer now prompts:
+- `Use default install config for GPIO14/15 RS485 [Y/n]`
+
+If accepted (default), it uses `/dev/serial0` and applies UART compatibility
+checks/fixes (`--uart-fix`) for better Modbus RTU reliability on Pi UART pins.
+Use `--no-default-install-config` and/or `--no-uart-fix` to opt out.
+
 Common variations:
 
 ```bash
