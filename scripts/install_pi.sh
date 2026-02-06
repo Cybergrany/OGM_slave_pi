@@ -649,7 +649,7 @@ systemd_reload_restart() {
     echo "Skipping ogm_pi start/restart until reboot (UART settings changed)."
     return
   fi
-  systemctl enable --now ogm_pi.socket
+  systemctl enable --now ogm_pi.socket ogm_pi.service
   systemctl restart ogm_pi.socket
   systemctl restart ogm_pi.service
 }
