@@ -1,0 +1,10 @@
+* text=auto
+
+# Enforce LF for scripts/config consumed by Linux targets.
+*.sh text eol=lf
+*.py text eol=lf
+*.service text eol=lf
+*.socket text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.ini text eol=lf
