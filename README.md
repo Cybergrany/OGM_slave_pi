@@ -36,11 +36,11 @@ logs and crash dumps are persisted under:
 
 ## Installation (Pi)
 
-1) **Install system dependencies** (libmodbus runtime + headers + libgpiod bindings):
+1) **Install system dependencies** (libmodbus runtime + libgpiod bindings):
 ```bash
 sudo apt-get update
-sudo apt-get install -y libmodbus5 libmodbus-dev python3-libgpiod \
-  || sudo apt-get install -y libmodbus libmodbus-dev python3-gpiod
+sudo apt-get install -y libmodbus5 python3-libgpiod \
+  || sudo apt-get install -y libmodbus python3-gpiod
 ```
 
 2) **Create a virtualenv and install Python deps**:

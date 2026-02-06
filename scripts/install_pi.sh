@@ -562,6 +562,27 @@ pick_first_available_pkg() {
   return 1
 }
 
+has_libmodbus_runtime() {
+  if command -v ldconfig >/dev/null 2>&1; then
+    if ldconfig -p 2>/dev/null | grep -q 'libmodbus\\.so'; then
+      return 0
+    fi
+  fi
+
+  local candidate
+  for candidate in \
+    /usr/lib/*/libmodbus.so \
+    /usr/lib/*/libmodbus.so.* \
+    /lib/*/libmodbus.so \
+    /lib/*/libmodbus.so.*
+  do
+    if [[ -e "$candidate" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 generate_pinmap() {
   if [[ -n "$PINMAP_SRC" ]]; then
     backup_file "$PINMAP_FILE"
@@ -686,10 +707,17 @@ if [[ "$SKIP_APT" != "true" ]]; then
   fi
   apt-get install -y \
     "$MODBUS_RUNTIME_PKG" \
-    libmodbus-dev \
     python3 \
     python3-venv \
     "$GPIO_PY_PKG"
+fi
+
+if [[ "$NO_MODBUS" != "true" ]]; then
+  if ! has_libmodbus_runtime; then
+    echo "ERROR: libmodbus runtime library not found on this system." >&2
+    echo "Install mode without --skip-apt, or install libmodbus manually and retry." >&2
+    exit 1
+  fi
 fi
 
 ensure_group_user

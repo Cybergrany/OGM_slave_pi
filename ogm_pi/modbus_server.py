@@ -1,15 +1,17 @@
 """Modbus RTU backend for OGM_slave_pi.
 
-Tries a native libmodbus-backed adapter first (pylibmodbus). If the installed
-binding does not expose a usable RTU server API, falls back to a pure-Python
-pymodbus serial server implementation.
+Uses a thin ctypes binding over libmodbus for RTU slave handling. The backend
+keeps Modbus receive/reply on a tight blocking loop and synchronizes register
+changes using sparse index updates to avoid full-table churn.
 """
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
+import errno
 import logging
 import threading
-import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
@@ -19,13 +21,69 @@ from .store import RegisterStore
 LOGGER = logging.getLogger(__name__)
 
 WATCH_TYPES = ("coils", "holding_regs")
+_RTU_MAX_ADU_LENGTH = 260
 
-FALLBACK_BLOCK_TYPES = {
-    "coils": 1,
-    "discretes": 2,
-    "holding_regs": 3,
-    "input_regs": 4,
+# libmodbus custom errno values (modbus.h)
+_EMBBADCRC = 112345689
+_EMBBADDATA = 112345690
+_EMBBADEXC = 112345691
+_EMBUNKEXC = 112345692
+_EMBMDATA = 112345693
+_EMBBADSLAVE = 112345694
+
+
+def _errno_values(*names: str) -> Set[int]:
+    values: Set[int] = set()
+    for name in names:
+        code = getattr(errno, name, None)
+        if isinstance(code, int):
+            values.add(code)
+    return values
+
+
+_RECOVERABLE_POSIX_ERRNOS = _errno_values("EAGAIN", "EINTR", "ETIMEDOUT")
+_REPLY_RECOVERABLE_POSIX_ERRNOS = _RECOVERABLE_POSIX_ERRNOS | _errno_values("EMSGSIZE")
+_RECEIVE_RECOVERABLE_LIBMODBUS_ERRNOS = {
+    _EMBBADCRC,
+    _EMBBADDATA,
+    _EMBBADEXC,
+    _EMBUNKEXC,
+    _EMBBADSLAVE,
 }
+_REPLY_RECOVERABLE_LIBMODBUS_ERRNOS = {
+    _EMBBADDATA,
+    _EMBBADEXC,
+    _EMBUNKEXC,
+    _EMBMDATA,
+}
+_STOP_INTERRUPT_ERRNOS = _errno_values("EBADF", "ENOTCONN", "EINVAL", "EIO", "EPIPE")
+
+
+class _ModbusMapping(ctypes.Structure):
+    _fields_ = [
+        ("nb_bits", ctypes.c_int),
+        ("start_bits", ctypes.c_int),
+        ("nb_input_bits", ctypes.c_int),
+        ("start_input_bits", ctypes.c_int),
+        ("nb_input_registers", ctypes.c_int),
+        ("start_input_registers", ctypes.c_int),
+        ("nb_registers", ctypes.c_int),
+        ("start_registers", ctypes.c_int),
+        ("tab_bits", ctypes.POINTER(ctypes.c_uint8)),
+        ("tab_input_bits", ctypes.POINTER(ctypes.c_uint8)),
+        ("tab_input_registers", ctypes.POINTER(ctypes.c_uint16)),
+        ("tab_registers", ctypes.POINTER(ctypes.c_uint16)),
+    ]
+
+
+class ModbusBackendError(RuntimeError):
+    """Raised for libmodbus backend failures with severity metadata."""
+
+    def __init__(self, message: str, *, fatal: bool, operation: str, errno_code: int | None) -> None:
+        super().__init__(message)
+        self.fatal = fatal
+        self.operation = operation
+        self.errno_code = errno_code
 
 
 @dataclass
@@ -67,7 +125,25 @@ class ChangeTracker:
             updates,
             changed,
         )
+        return ChangeSet(updates=updates, events=self._build_events(changed, after))
 
+    def events_from_updates(self, updates: Dict[str, List[tuple[int, int]]], tables: Dict[str, List[int]]) -> List[Dict[str, Any]]:
+        """Build change events from sparse updates and current table snapshots."""
+        changed: Dict[str, Set[str]] = {}
+
+        for idx, _value in updates.get("coils", []):
+            pin = self._coil_index[idx] if 0 <= idx < len(self._coil_index) else None
+            if pin is not None:
+                changed.setdefault(pin.name, set()).add("coils")
+
+        for idx, _value in updates.get("holding_regs", []):
+            pin = self._holding_index[idx] if 0 <= idx < len(self._holding_index) else None
+            if pin is not None:
+                changed.setdefault(pin.name, set()).add("holding_regs")
+
+        return self._build_events(changed, tables)
+
+    def _build_events(self, changed: Dict[str, Set[str]], tables: Dict[str, List[int]]) -> List[Dict[str, Any]]:
         events: List[Dict[str, Any]] = []
         for name, types in changed.items():
             pin = self._pins_by_name.get(name)
@@ -75,10 +151,12 @@ class ChangeTracker:
                 continue
             values: Dict[str, List[int]] = {}
             if "coils" in types:
-                values["coils"] = self._slice_values(after.get("coils", []), pin.coils.start, pin.coils.count)
+                values["coils"] = self._slice_values(tables.get("coils", []), pin.coils.start, pin.coils.count)
             if "holding_regs" in types:
                 values["holding_regs"] = self._slice_values(
-                    after.get("holding_regs", []), pin.holding_regs.start, pin.holding_regs.count
+                    tables.get("holding_regs", []),
+                    pin.holding_regs.start,
+                    pin.holding_regs.count,
                 )
             if not values:
                 continue
@@ -93,8 +171,7 @@ class ChangeTracker:
                     "values": values,
                 }
             )
-
-        return ChangeSet(updates=updates, events=events)
+        return events
 
     @staticmethod
     def _build_index_map(pins: List[PinRecord], size: int, span_attr: str) -> List[Optional[PinRecord]]:
@@ -162,402 +239,14 @@ class NullBackend(ModbusBackend):
         LOGGER.info("Modbus backend disabled; IPC-only mode")
 
 
-class PylibmodbusAdapter:
-    """Thin adapter over the pylibmodbus RTU server API."""
+class LibModbusAdapter:
+    """Thin ctypes wrapper around libmodbus RTU slave APIs."""
 
-    def __init__(
-        self,
-        serial: str,
-        baud: int,
-        parity: str,
-        data_bits: int,
-        stop_bits: int,
-        slave_address: int,
-        totals: Dict[str, int],
-    ) -> None:
-        try:
-            import pylibmodbus as modbus
-        except ImportError as exc:
-            raise RuntimeError("pylibmodbus is required; install it with pip") from exc
-
-        self._mod = modbus
-        self._server = self._create_server(serial, baud, parity, data_bits, stop_bits)
-        self._slave = self._init_slave(slave_address)
-        self._block_sizes = {
-            "coils": int(totals.get("coils", 0)),
-            "discretes": int(totals.get("discretes", 0)),
-            "input_regs": int(totals.get("input_regs", 0)),
-            "holding_regs": int(totals.get("holding_regs", 0)),
-        }
-        self._register_blocks()
-
-    def _module_candidates(self) -> list[tuple[str, Any]]:
-        modules: list[tuple[str, Any]] = [("pylibmodbus", self._mod)]
-        for attr in ("server", "rtu", "modbus", "backend"):
-            child = getattr(self._mod, attr, None)
-            if child is None:
-                continue
-            modules.append((f"pylibmodbus.{attr}", child))
-        return modules
-
-    def _discover_server_classes(self) -> list[tuple[str, type]]:
-        preferred_names = (
-            "ModbusRtuServer",
-            "ModbusRTUServer",
-            "ModbusServerRtu",
-            "ModbusServerRTU",
-            "RtuServer",
-            "RTUServer",
-            "ModbusServer",
-        )
-        discovered: list[tuple[str, type]] = []
-        seen_ids: set[int] = set()
-
-        def add_candidate(label: str, candidate: Any) -> None:
-            if not isinstance(candidate, type):
-                return
-            ident = id(candidate)
-            if ident in seen_ids:
-                return
-            seen_ids.add(ident)
-            discovered.append((label, candidate))
-
-        for module_name, module in self._module_candidates():
-            for cls_name in preferred_names:
-                if hasattr(module, cls_name):
-                    add_candidate(f"{module_name}.{cls_name}", getattr(module, cls_name))
-
-        for module_name, module in self._module_candidates():
-            for cls_name in dir(module):
-                if cls_name.startswith("_"):
-                    continue
-                try:
-                    candidate = getattr(module, cls_name)
-                except Exception:
-                    continue
-                lower = cls_name.lower()
-                if "server" not in lower and "rtu" not in lower:
-                    continue
-                if "modbus" not in lower and "rtu" not in lower:
-                    continue
-                add_candidate(f"{module_name}.{cls_name}", candidate)
-
-        return discovered
-
-    def _available_symbols(self, limit: int = 40) -> list[str]:
-        names: set[str] = set()
-        for module_name, module in self._module_candidates():
-            for symbol in dir(module):
-                if symbol.startswith("_"):
-                    continue
-                lower = symbol.lower()
-                if "modbus" not in lower and "rtu" not in lower and "server" not in lower:
-                    continue
-                names.add(f"{module_name}.{symbol}")
-        ordered = sorted(names)
-        if len(ordered) <= limit:
-            return ordered
-        return ordered[:limit] + [f"... (+{len(ordered) - limit} more)"]
-
-    def _server_ctor_variants(self, serial: str, baud: int, parity: str, data_bits: int, stop_bits: int):
-        kwargs_common = {"parity": parity, "data_bits": data_bits, "stop_bits": stop_bits}
-        kwargs_common_alt = {"parity": parity, "data_bit": data_bits, "stop_bit": stop_bits}
-        serial_bytes = serial.encode("utf-8")
-        parity_bytes = parity.encode("utf-8")[:1] if parity else b"N"
-        kwargs_common_alt_bytes = {"parity": parity_bytes, "data_bit": data_bits, "stop_bit": stop_bits}
-        return [
-            ("positional", (serial, baud, parity, data_bits, stop_bits), {}),
-            ("positional-parity-bytes", (serial, baud, parity_bytes, data_bits, stop_bits), {}),
-            ("positional-bytes", (serial_bytes, baud, parity, data_bits, stop_bits), {}),
-            ("positional-bytes-parity-bytes", (serial_bytes, baud, parity_bytes, data_bits, stop_bits), {}),
-            ("positional-legacy", (serial, baud, parity, data_bits, stop_bits, 0), {}),
-            ("positional-legacy-parity-bytes", (serial, baud, parity_bytes, data_bits, stop_bits, 0), {}),
-            ("positional-legacy-bytes", (serial_bytes, baud, parity, data_bits, stop_bits, 0), {}),
-            ("positional-legacy-bytes-parity-bytes", (serial_bytes, baud, parity_bytes, data_bits, stop_bits, 0), {}),
-            ("positional-minimal", (serial, baud, parity), {}),
-            ("positional-minimal-parity-bytes", (serial, baud, parity_bytes), {}),
-            ("positional-minimal-bytes", (serial_bytes, baud, parity), {}),
-            ("positional-minimal-bytes-parity-bytes", (serial_bytes, baud, parity_bytes), {}),
-            (
-                "serial+baudrate",
-                (),
-                {
-                    "serial": serial,
-                    "baudrate": baud,
-                    **kwargs_common,
-                },
-            ),
-            (
-                "serial+baud",
-                (),
-                {
-                    "serial": serial,
-                    "baud": baud,
-                    **kwargs_common,
-                },
-            ),
-            (
-                "serial+baud-legacy-bits",
-                (),
-                {
-                    "serial": serial,
-                    "baud": baud,
-                    **kwargs_common_alt,
-                },
-            ),
-            (
-                "serial-bytes+baud-legacy-bits",
-                (),
-                {
-                    "serial": serial_bytes,
-                    "baud": baud,
-                    **kwargs_common_alt,
-                },
-            ),
-            (
-                "serial-bytes+baud-legacy-bits-parity-bytes",
-                (),
-                {
-                    "serial": serial_bytes,
-                    "baud": baud,
-                    **kwargs_common_alt_bytes,
-                },
-            ),
-            (
-                "port+baudrate",
-                (),
-                {
-                    "port": serial,
-                    "baudrate": baud,
-                    **kwargs_common,
-                },
-            ),
-            (
-                "port+baud",
-                (),
-                {
-                    "port": serial,
-                    "baud": baud,
-                    **kwargs_common,
-                },
-            ),
-            (
-                "port-bytes+baud",
-                (),
-                {
-                    "port": serial_bytes,
-                    "baud": baud,
-                    **kwargs_common,
-                },
-            ),
-            (
-                "device+baudrate",
-                (),
-                {
-                    "device": serial,
-                    "baudrate": baud,
-                    **kwargs_common,
-                },
-            ),
-            (
-                "device+baud",
-                (),
-                {
-                    "device": serial,
-                    "baud": baud,
-                    **kwargs_common,
-                },
-            ),
-            (
-                "device+baud-legacy-bits",
-                (),
-                {
-                    "device": serial,
-                    "baud": baud,
-                    **kwargs_common_alt,
-                },
-            ),
-            (
-                "device-bytes+baud-legacy-bits",
-                (),
-                {
-                    "device": serial_bytes,
-                    "baud": baud,
-                    **kwargs_common_alt,
-                },
-            ),
-            (
-                "device-bytes+baud-legacy-bits-parity-bytes",
-                (),
-                {
-                    "device": serial_bytes,
-                    "baud": baud,
-                    **kwargs_common_alt_bytes,
-                },
-            ),
-        ]
-
-    @staticmethod
-    def _looks_like_server(server: Any) -> bool:
-        has_request_loop = any(hasattr(server, meth) for meth in ("handle_request", "receive", "serve_once"))
-        has_mapping_api = any(
-            hasattr(server, meth)
-            for meth in ("add_slave", "get_slave", "set_slave", "add_block", "set_values", "get_values")
-        )
-        return has_request_loop and has_mapping_api
-
-    def _create_server(self, serial: str, baud: int, parity: str, data_bits: int, stop_bits: int):
-        candidates = self._discover_server_classes()
-        available_symbols = ", ".join(self._available_symbols())
-        if not candidates:
-            raise RuntimeError(
-                "pylibmodbus RTU server class not found. "
-                f"Available modbus-like symbols: {available_symbols or '<none>'}"
-            )
-
-        errors: list[str] = []
-        for label, server_cls in candidates:
-            server = None
-            ctor_errors: list[str] = []
-            for variant_name, args, kwargs in self._server_ctor_variants(serial, baud, parity, data_bits, stop_bits):
-                try:
-                    server = server_cls(*args, **kwargs)
-                    break
-                except TypeError as exc:
-                    ctor_errors.append(f"{variant_name}: {exc}")
-                except Exception as exc:  # pragma: no cover - runtime dependent
-                    ctor_errors.append(f"{variant_name}: {type(exc).__name__}: {exc}")
-                    break
-            if server is None:
-                joined = "; ".join(ctor_errors[-3:]) if ctor_errors else "no constructor variants matched"
-                errors.append(f"{label} -> {joined}")
-                continue
-            if not self._looks_like_server(server):
-                errors.append(f"{label} -> object does not look like RTU server ({type(server).__name__})")
-                continue
-
-            LOGGER.info("Using pylibmodbus server class: %s", label)
-            if hasattr(server, "start"):
-                server.start()
-            elif hasattr(server, "listen"):
-                server.listen()
-            return server
-
-        details = "; ".join(errors[-6:]) if errors else "no candidates succeeded"
-        raise RuntimeError(
-            "pylibmodbus RTU server initialization failed. "
-            f"Tried {len(candidates)} class candidate(s). Last errors: {details}. "
-            f"Available modbus-like symbols: {available_symbols or '<none>'}"
-        )
-
-    def _init_slave(self, slave_address: int):
-        slave = None
-        if hasattr(self._server, "add_slave"):
-            try:
-                slave = self._server.add_slave(slave_address)
-            except TypeError:
-                self._server.add_slave(slave_address)
-        if slave is None and hasattr(self._server, "get_slave"):
-            slave = self._server.get_slave(slave_address)
-        if slave is None and hasattr(self._server, "set_slave"):
-            self._server.set_slave(slave_address)
-            slave = self._server
-        return slave if slave is not None else self._server
-
-    def _register_blocks(self) -> None:
-        for name, count in self._block_sizes.items():
-            if count <= 0:
-                continue
-            block_type = self._resolve_block_type(name, FALLBACK_BLOCK_TYPES[name])
-            target = self._slave if self._slave is not None else self._server
-            if hasattr(target, "add_block"):
-                target.add_block(name, block_type, 0, count)
-            else:
-                raise RuntimeError("pylibmodbus adapter requires add_block() support")
-
-    def _resolve_block_type(self, name: str, fallback: int) -> int:
-        aliases = {
-            "coils": ["COILS", "COIL"],
-            "discretes": ["DISCRETE_INPUTS", "DISCRETE_IN", "INPUT_BITS"],
-            "input_regs": ["INPUT_REGISTERS", "INPUT_REGS", "INPUT_REGISTER"],
-            "holding_regs": ["HOLDING_REGISTERS", "HOLDING_REGS", "HOLDING_REGISTER"],
-        }
-        for attr in aliases.get(name, []):
-            if hasattr(self._mod, attr):
-                return int(getattr(self._mod, attr))
-        return fallback
-
-    def handle_once(self) -> None:
-        if hasattr(self._server, "handle_request"):
-            self._server.handle_request()
-        elif hasattr(self._server, "receive"):
-            self._server.receive()
-        elif hasattr(self._server, "serve_once"):
-            self._server.serve_once()
-        else:
-            raise RuntimeError("pylibmodbus adapter requires handle_request()/receive() support")
-
-    def write_tables(self, tables: Dict[str, list[int]], names: Iterable[str] | None = None) -> None:
-        """Write the provided register tables into the Modbus server blocks."""
-        target_names = list(names) if names is not None else list(self._block_sizes.keys())
-        for name in target_names:
-            count = self._block_sizes.get(name, 0)
-            if count <= 0:
-                continue
-            values = tables.get(name)
-            if values is None:
-                continue
-            self._set_values(name, values)
-
-    def read_tables(self, names: Iterable[str] | None = None) -> Dict[str, list[int]]:
-        """Read selected register tables from the Modbus server blocks."""
-        target_names = list(names) if names is not None else list(self._block_sizes.keys())
-        tables: Dict[str, list[int]] = {}
-        for name in target_names:
-            count = self._block_sizes.get(name, 0)
-            if count <= 0:
-                continue
-            tables[name] = list(self._get_values(name, count))
-        return tables
-
-    def close(self) -> None:
-        if hasattr(self._server, "close"):
-            self._server.close()
-        elif hasattr(self._server, "stop"):
-            self._server.stop()
-
-    def _set_values(self, name: str, values: list[int]) -> None:
-        target = self._slave if self._slave is not None else self._server
-        if hasattr(target, "set_values"):
-            target.set_values(name, 0, values)
-            return
-        if name in {"coils", "discretes"} and hasattr(target, "set_bits"):
-            target.set_bits(0, values)
-            return
-        if name in {"input_regs", "holding_regs"} and hasattr(target, "set_registers"):
-            target.set_registers(0, values)
-            return
-        raise RuntimeError("pylibmodbus adapter requires set_values() support")
-
-    def _get_values(self, name: str, count: int) -> list[int]:
-        target = self._slave if self._slave is not None else self._server
-        if hasattr(target, "get_values"):
-            return list(target.get_values(name, 0, count))
-        if name in {"coils", "discretes"} and hasattr(target, "get_bits"):
-            return list(target.get_bits(0, count))
-        if name in {"input_regs", "holding_regs"} and hasattr(target, "get_registers"):
-            return list(target.get_registers(0, count))
-        raise RuntimeError("pylibmodbus adapter requires get_values() support")
-
-
-class PymodbusAdapter:
-    """Adapter over pymodbus serial server API."""
-
-    _FC_CANDIDATES = {
-        "coils": (1, "co", "c"),
-        "discretes": (2, "di", "d"),
-        "holding_regs": (3, "hr", "h"),
-        "input_regs": (4, "ir", "i"),
+    _TABLE_FIELD = {
+        "coils": "tab_bits",
+        "discretes": "tab_input_bits",
+        "input_regs": "tab_input_registers",
+        "holding_regs": "tab_registers",
     }
 
     def __init__(
@@ -570,160 +259,337 @@ class PymodbusAdapter:
         slave_address: int,
         totals: Dict[str, int],
     ) -> None:
-        try:
-            from pymodbus import FramerType
-            from pymodbus.datastore import ModbusDeviceContext, ModbusSequentialDataBlock, ModbusServerContext
-            from pymodbus.server import ServerStop, StartSerialServer
-        except ImportError as exc:
-            raise RuntimeError("pymodbus is required for the fallback RTU server backend") from exc
-
-        self._framer_type = FramerType
-        self._modbus_device_context_cls = ModbusDeviceContext
-        self._modbus_sequential_block_cls = ModbusSequentialDataBlock
-        self._modbus_server_context_cls = ModbusServerContext
-        self._start_serial_server = StartSerialServer
-        self._server_stop = ServerStop
-
         self._serial = serial
-        self._baud = int(baud)
-        self._parity = str(parity or "N")
-        self._data_bits = int(data_bits)
-        self._stop_bits = int(stop_bits)
-        self._slave_address = int(slave_address)
-        self._block_sizes = {
+        self._sizes = {
             "coils": int(totals.get("coils", 0)),
             "discretes": int(totals.get("discretes", 0)),
             "input_regs": int(totals.get("input_regs", 0)),
             "holding_regs": int(totals.get("holding_regs", 0)),
         }
-        self._server_error: Optional[BaseException] = None
-        self._server_thread: Optional[threading.Thread] = None
+        self._lib = self._load_library()
+        self._configure_symbols()
+        self._ctx: Optional[ctypes.c_void_p] = None
+        self._mapping: Optional[ctypes.POINTER(_ModbusMapping)] = None
+        self._request = (ctypes.c_uint8 * _RTU_MAX_ADU_LENGTH)()
 
-        self._device = self._build_device_context()
-        self._context = self._build_server_context()
-        self._start_server_thread()
-
-    def _build_device_context(self):
-        def block(size: int):
-            # pymodbus data blocks need at least one element.
-            return self._modbus_sequential_block_cls(0, [0] * max(1, size))
-
-        return self._modbus_device_context_cls(
-            co=block(self._block_sizes["coils"]),
-            di=block(self._block_sizes["discretes"]),
-            hr=block(self._block_sizes["holding_regs"]),
-            ir=block(self._block_sizes["input_regs"]),
-        )
-
-    def _build_server_context(self):
-        attempts = [
-            {"devices": {self._slave_address: self._device}, "single": False},
-            {"slaves": {self._slave_address: self._device}, "single": False},
-            {"devices": self._device, "single": True},
-            {"slaves": self._device, "single": True},
-        ]
-        last_exc: Optional[Exception] = None
-        for kwargs in attempts:
-            try:
-                return self._modbus_server_context_cls(**kwargs)
-            except TypeError as exc:
-                last_exc = exc
-                continue
-        raise RuntimeError("Unable to construct pymodbus server context") from last_exc
-
-    def _server_main(self) -> None:
         try:
-            self._start_serial_server(
-                context=self._context,
-                framer=self._framer_type.RTU,
-                port=self._serial,
-                baudrate=self._baud,
-                bytesize=self._data_bits,
-                parity=self._parity,
-                stopbits=self._stop_bits,
-                timeout=0.05,
-                ignore_missing_devices=False,
+            self._ctx = self._create_context(serial, baud, parity, data_bits, stop_bits, slave_address)
+            self._mapping = self._create_mapping()
+            self._validate_mapping()
+        except Exception:
+            self.close()
+            raise
+
+    @staticmethod
+    def _load_library() -> ctypes.CDLL:
+        candidates: List[str] = []
+        found = ctypes.util.find_library("modbus")
+        if found:
+            candidates.append(found)
+        candidates.extend(["libmodbus.so.5", "libmodbus.so"])
+
+        errors: List[str] = []
+        for candidate in candidates:
+            try:
+                return ctypes.CDLL(candidate, use_errno=True)
+            except OSError as exc:
+                errors.append(f"{candidate}: {exc}")
+
+        detail = "; ".join(errors) if errors else "no load candidates"
+        raise RuntimeError(f"Unable to load libmodbus shared library ({detail})")
+
+    def _configure_symbols(self) -> None:
+        self._lib.modbus_new_rtu.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_char, ctypes.c_int, ctypes.c_int]
+        self._lib.modbus_new_rtu.restype = ctypes.c_void_p
+
+        self._lib.modbus_set_slave.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self._lib.modbus_set_slave.restype = ctypes.c_int
+
+        self._lib.modbus_connect.argtypes = [ctypes.c_void_p]
+        self._lib.modbus_connect.restype = ctypes.c_int
+
+        self._lib.modbus_receive.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8)]
+        self._lib.modbus_receive.restype = ctypes.c_int
+
+        self._lib.modbus_reply.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint8),
+            ctypes.c_int,
+            ctypes.POINTER(_ModbusMapping),
+        ]
+        self._lib.modbus_reply.restype = ctypes.c_int
+
+        self._lib.modbus_mapping_new.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        self._lib.modbus_mapping_new.restype = ctypes.POINTER(_ModbusMapping)
+
+        self._lib.modbus_mapping_free.argtypes = [ctypes.POINTER(_ModbusMapping)]
+        self._lib.modbus_mapping_free.restype = None
+
+        self._lib.modbus_close.argtypes = [ctypes.c_void_p]
+        self._lib.modbus_close.restype = None
+
+        self._lib.modbus_free.argtypes = [ctypes.c_void_p]
+        self._lib.modbus_free.restype = None
+
+        self._lib.modbus_strerror.argtypes = [ctypes.c_int]
+        self._lib.modbus_strerror.restype = ctypes.c_char_p
+
+    def _create_context(
+        self,
+        serial: str,
+        baud: int,
+        parity: str,
+        data_bits: int,
+        stop_bits: int,
+        slave_address: int,
+    ) -> ctypes.c_void_p:
+        serial_bytes = serial.encode("utf-8")
+        parity_byte = (parity or "N").strip().upper().encode("ascii", "ignore")[:1] or b"N"
+
+        ctx = self._lib.modbus_new_rtu(serial_bytes, int(baud), parity_byte, int(data_bits), int(stop_bits))
+        if not ctx:
+            self._raise_modbus_error("new_rtu")
+
+        if self._lib.modbus_set_slave(ctx, int(slave_address)) == -1:
+            self._raise_modbus_error("set_slave")
+
+        if self._lib.modbus_connect(ctx) == -1:
+            self._raise_modbus_error("connect")
+
+        return ctypes.c_void_p(ctx)
+
+    def _create_mapping(self) -> ctypes.POINTER(_ModbusMapping):
+        mapping = self._lib.modbus_mapping_new(
+            self._sizes["coils"],
+            self._sizes["discretes"],
+            self._sizes["holding_regs"],
+            self._sizes["input_regs"],
+        )
+        if not mapping:
+            self._raise_modbus_error("mapping_new")
+        return mapping
+
+    def _validate_mapping(self) -> None:
+        if self._mapping is None:
+            raise RuntimeError("libmodbus mapping is not initialized")
+
+        mapping = self._mapping.contents
+        expected = {
+            "coils": self._sizes["coils"],
+            "discretes": self._sizes["discretes"],
+            "input_regs": self._sizes["input_regs"],
+            "holding_regs": self._sizes["holding_regs"],
+        }
+
+        if (
+            mapping.start_bits != 0
+            or mapping.start_input_bits != 0
+            or mapping.start_input_registers != 0
+            or mapping.start_registers != 0
+            or mapping.nb_bits != expected["coils"]
+            or mapping.nb_input_bits != expected["discretes"]
+            or mapping.nb_input_registers != expected["input_regs"]
+            or mapping.nb_registers != expected["holding_regs"]
+        ):
+            raise RuntimeError(
+                "libmodbus mapping layout mismatch; expected starts=0 and counts "
+                f"{expected}, got coils={mapping.nb_bits}, discretes={mapping.nb_input_bits}, "
+                f"input_regs={mapping.nb_input_registers}, holding_regs={mapping.nb_registers}"
             )
-        except BaseException as exc:  # pragma: no cover - runtime dependent
-            self._server_error = exc
-            LOGGER.exception("pymodbus serial server thread failed")
 
-    def _start_server_thread(self) -> None:
-        self._server_thread = threading.Thread(target=self._server_main, name="ogm_modbus_pymodbus", daemon=True)
-        self._server_thread.start()
-        # Allow immediate startup errors to surface early.
-        time.sleep(0.25)
-        if self._server_error is not None:
-            raise RuntimeError("pymodbus serial server failed to start") from self._server_error
-        if self._server_thread is None or not self._server_thread.is_alive():
-            raise RuntimeError("pymodbus serial server exited during startup")
+        for table_name in self._sizes:
+            pointer = self._table_pointer(table_name)
+            if self._sizes[table_name] > 0 and not bool(pointer):
+                raise RuntimeError(f"libmodbus mapping pointer missing for {table_name}")
 
-    def _coerce_write_values(self, name: str, values: list[int]) -> list[int] | list[bool]:
-        if name in {"coils", "discretes"}:
-            return [bool(v) for v in values]
-        return [int(v) & 0xFFFF for v in values]
+    def _table_pointer(self, name: str):
+        if self._mapping is None:
+            raise RuntimeError("libmodbus mapping is not initialized")
+        field = self._TABLE_FIELD[name]
+        return getattr(self._mapping.contents, field)
 
-    def _coerce_read_values(self, values: Iterable[Any]) -> list[int]:
-        return [int(bool(v)) if isinstance(v, bool) else int(v) for v in values]
+    def _normalize_value(self, table: str, value: int) -> int:
+        if table in {"coils", "discretes"}:
+            return 1 if int(value) else 0
+        return int(value) & 0xFFFF
 
-    def _set_values(self, name: str, values: list[int]) -> None:
-        payload = self._coerce_write_values(name, values)
-        last_exc: Optional[Exception] = None
-        for fc in self._FC_CANDIDATES[name]:
-            try:
-                self._device.setValues(fc, 0, payload)
-                return
-            except Exception as exc:
-                last_exc = exc
-        raise RuntimeError(f"pymodbus setValues failed for {name}") from last_exc
+    def _is_recoverable_errno(self, code: int, operation: str) -> bool:
+        if operation == "receive":
+            return code in _RECOVERABLE_POSIX_ERRNOS or code in _RECEIVE_RECOVERABLE_LIBMODBUS_ERRNOS
+        if operation == "reply":
+            return code in _REPLY_RECOVERABLE_POSIX_ERRNOS or code in _REPLY_RECOVERABLE_LIBMODBUS_ERRNOS
+        return False
 
-    def _get_values(self, name: str, count: int) -> list[int]:
-        last_exc: Optional[Exception] = None
-        for fc in self._FC_CANDIDATES[name]:
-            try:
-                raw = self._device.getValues(fc, 0, count)
-                return self._coerce_read_values(raw)
-            except Exception as exc:
-                last_exc = exc
-        raise RuntimeError(f"pymodbus getValues failed for {name}") from last_exc
+    def _error_message(self, code: int) -> str:
+        try:
+            msg = self._lib.modbus_strerror(code)
+        except Exception:
+            msg = None
+        if not msg:
+            return f"errno {code}"
+        if isinstance(msg, bytes):
+            return msg.decode("utf-8", errors="replace")
+        return str(msg)
 
-    def handle_once(self) -> None:
-        if self._server_error is not None:
-            raise RuntimeError("pymodbus serial server stopped unexpectedly") from self._server_error
-        time.sleep(0.01)
+    def _raise_modbus_error(self, operation: str) -> None:
+        code = int(ctypes.get_errno())
+        fatal = not self._is_recoverable_errno(code, operation)
+        message = f"libmodbus {operation} failed (errno={code}: {self._error_message(code)})"
+        raise ModbusBackendError(message, fatal=fatal, operation=operation, errno_code=code)
 
-    def write_tables(self, tables: Dict[str, list[int]], names: Iterable[str] | None = None) -> None:
-        target_names = list(names) if names is not None else list(self._block_sizes.keys())
-        for name in target_names:
-            count = self._block_sizes.get(name, 0)
-            if count <= 0:
+    def apply_full_tables(self, tables: Dict[str, List[int]]) -> None:
+        """Copy full register tables into libmodbus mapping memory."""
+        for name, size in self._sizes.items():
+            if size <= 0:
                 continue
             values = tables.get(name)
             if values is None:
-                continue
-            self._set_values(name, list(values[:count]))
+                raise RuntimeError(f"Missing table '{name}' while initializing libmodbus mapping")
+            if len(values) != size:
+                raise RuntimeError(f"Expected {size} values for {name}, got {len(values)}")
 
-    def read_tables(self, names: Iterable[str] | None = None) -> Dict[str, list[int]]:
-        target_names = list(names) if names is not None else list(self._block_sizes.keys())
-        tables: Dict[str, list[int]] = {}
-        for name in target_names:
-            count = self._block_sizes.get(name, 0)
+            pointer = self._table_pointer(name)
+            for idx in range(size):
+                pointer[idx] = self._normalize_value(name, values[idx])
+
+    def apply_sparse_updates(self, updates: Dict[str, List[tuple[int, int]]]) -> None:
+        """Apply sparse index/value updates to libmodbus mapping memory."""
+        for name, pairs in updates.items():
+            size = self._sizes.get(name, 0)
+            if size <= 0 or not pairs:
+                continue
+            pointer = self._table_pointer(name)
+            for idx, value in pairs:
+                if idx < 0 or idx >= size:
+                    raise RuntimeError(f"Store update index {idx} out of range for {name} ({size})")
+                pointer[idx] = self._normalize_value(name, value)
+
+    def collect_span_updates(self, table: str, spans: Iterable[tuple[int, int]], shadow: List[int]) -> List[tuple[int, int]]:
+        """Read mapping values for touched spans and return sparse updates vs shadow."""
+        size = self._sizes.get(table, 0)
+        if size <= 0:
+            return []
+        if len(shadow) != size:
+            raise RuntimeError(f"Shadow table size mismatch for {table}: expected {size}, got {len(shadow)}")
+
+        pointer = self._table_pointer(table)
+        changed: Dict[int, int] = {}
+
+        for start, count in spans:
             if count <= 0:
                 continue
-            tables[name] = self._get_values(name, count)
-        return tables
+            lo = max(0, int(start))
+            hi = min(size, int(start) + int(count))
+            if hi <= lo:
+                continue
+            for idx in range(lo, hi):
+                value = self._normalize_value(table, int(pointer[idx]))
+                if shadow[idx] == value:
+                    continue
+                shadow[idx] = value
+                changed[idx] = value
 
-    def close(self) -> None:
+        return sorted(changed.items())
+
+    def receive_request(self) -> tuple[int, bytes]:
+        """Block waiting for a Modbus RTU request and return (length, bytes)."""
+        if self._ctx is None:
+            raise RuntimeError("libmodbus context is not initialized")
+        rc = self._lib.modbus_receive(self._ctx, self._request)
+        if rc == -1:
+            self._raise_modbus_error("receive")
+        if rc <= 0:
+            return 0, b""
+        return int(rc), bytes(self._request[:rc])
+
+    def reply(self, request_len: int) -> None:
+        """Reply to the last request using current libmodbus mapping values."""
+        if self._ctx is None or self._mapping is None:
+            raise RuntimeError("libmodbus adapter is not initialized")
+        rc = self._lib.modbus_reply(self._ctx, self._request, int(request_len), self._mapping)
+        if rc == -1:
+            self._raise_modbus_error("reply")
+
+    def interrupt(self) -> None:
+        """Interrupt a blocking receive by closing the RTU context descriptor."""
+        if self._ctx is None:
+            return
         try:
-            self._server_stop()
+            self._lib.modbus_close(self._ctx)
         except Exception:
             pass
-        if self._server_thread is not None:
-            self._server_thread.join(timeout=2.0)
+
+    def close(self) -> None:
+        """Release libmodbus resources."""
+        if self._mapping is not None:
+            try:
+                self._lib.modbus_mapping_free(self._mapping)
+            except Exception:
+                pass
+            self._mapping = None
+
+        if self._ctx is not None:
+            try:
+                self._lib.modbus_close(self._ctx)
+            except Exception:
+                pass
+            try:
+                self._lib.modbus_free(self._ctx)
+            except Exception:
+                pass
+            self._ctx = None
+
+
+def _u16_be(payload: bytes, offset: int) -> int:
+    if offset + 1 >= len(payload):
+        return 0
+    return (int(payload[offset]) << 8) | int(payload[offset + 1])
+
+
+def _extract_write_spans(request: bytes) -> Dict[str, List[tuple[int, int]]]:
+    """Parse writable spans touched by a Modbus request ADU."""
+    if len(request) < 2:
+        return {}
+
+    fc = int(request[1])
+
+    # Write single coil
+    if fc == 0x05 and len(request) >= 6:
+        return {"coils": [(_u16_be(request, 2), 1)]}
+
+    # Write single holding register
+    if fc == 0x06 and len(request) >= 6:
+        return {"holding_regs": [(_u16_be(request, 2), 1)]}
+
+    # Write multiple coils
+    if fc == 0x0F and len(request) >= 6:
+        quantity = _u16_be(request, 4)
+        if quantity > 0:
+            return {"coils": [(_u16_be(request, 2), quantity)]}
+        return {}
+
+    # Write multiple holding registers
+    if fc == 0x10 and len(request) >= 6:
+        quantity = _u16_be(request, 4)
+        if quantity > 0:
+            return {"holding_regs": [(_u16_be(request, 2), quantity)]}
+        return {}
+
+    # Mask write register
+    if fc == 0x16 and len(request) >= 6:
+        return {"holding_regs": [(_u16_be(request, 2), 1)]}
+
+    # Read/write multiple registers (write span starts at bytes 6/8)
+    if fc == 0x17 and len(request) >= 10:
+        quantity = _u16_be(request, 8)
+        if quantity > 0:
+            return {"holding_regs": [(_u16_be(request, 6), quantity)]}
+
+    return {}
 
 
 class LibModbusBackend(ModbusBackend):
-    """pylibmodbus RTU backend with a change-detecting sync loop."""
+    """Direct libmodbus RTU backend with sparse register synchronization."""
 
     def __init__(
         self,
@@ -746,12 +612,14 @@ class LibModbusBackend(ModbusBackend):
         self._parity = parity
         self._data_bits = data_bits
         self._stop_bits = stop_bits
-        self._adapter: Optional[Any] = None
+        self._adapter: Optional[LibModbusAdapter] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._tracker = ChangeTracker(pinmap)
         self._event_sink = event_sink
         self._error_handler = error_handler
+        self._shadow: Dict[str, List[int]] = {"coils": [], "holding_regs": []}
+        self._recoverable_error_count = 0
 
     def start(self) -> None:
         totals = {
@@ -760,39 +628,24 @@ class LibModbusBackend(ModbusBackend):
             "input_regs": len(self._store.input_regs),
             "holding_regs": len(self._store.holding_regs),
         }
-        pylib_error: Optional[Exception] = None
-        try:
-            self._adapter = PylibmodbusAdapter(
-                self._serial,
-                self._baud,
-                self._parity,
-                self._data_bits,
-                self._stop_bits,
-                self._slave_address,
-                totals,
-            )
-            LOGGER.info("Using Modbus adapter: pylibmodbus")
-        except Exception as exc:
-            pylib_error = exc
-            LOGGER.warning("pylibmodbus backend unavailable (%s); trying pymodbus fallback", exc)
 
-        if self._adapter is None:
-            try:
-                self._adapter = PymodbusAdapter(
-                    self._serial,
-                    self._baud,
-                    self._parity,
-                    self._data_bits,
-                    self._stop_bits,
-                    self._slave_address,
-                    totals,
-                )
-                LOGGER.info("Using Modbus adapter: pymodbus")
-            except Exception as pymodbus_exc:
-                raise RuntimeError(
-                    "Unable to initialize Modbus RTU backend with pylibmodbus or pymodbus. "
-                    f"pylibmodbus error: {pylib_error}; pymodbus error: {pymodbus_exc}"
-                ) from pymodbus_exc
+        self._adapter = LibModbusAdapter(
+            self._serial,
+            self._baud,
+            self._parity,
+            self._data_bits,
+            self._stop_bits,
+            self._slave_address,
+            totals,
+        )
+
+        initial = self._store.snapshot_tables()
+        self._adapter.apply_full_tables(initial)
+        self._shadow["coils"] = list(initial.get("coils", []))
+        self._shadow["holding_regs"] = list(initial.get("holding_regs", []))
+
+        # Flush any startup writes from the store; initial mapping now reflects state.
+        self._store.consume_dirty_updates()
 
         self._thread = threading.Thread(target=self._serve_loop, name="ogm_modbus", daemon=True)
         self._thread.start()
@@ -801,31 +654,103 @@ class LibModbusBackend(ModbusBackend):
     def stop(self) -> None:
         self._stop_event.set()
         if self._adapter is not None:
-            self._adapter.close()
+            self._adapter.interrupt()
         if self._thread is not None:
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=2.0)
+        if self._adapter is not None:
+            self._adapter.close()
+
+    def _sync_store_to_mapping(self) -> None:
+        if self._adapter is None:
+            return
+
+        pending = self._store.consume_dirty_updates()
+        if not pending:
+            return
+
+        self._adapter.apply_sparse_updates(pending)
+        for name in WATCH_TYPES:
+            shadow = self._shadow.get(name)
+            if shadow is None:
+                continue
+            for idx, value in pending.get(name, []):
+                if 0 <= idx < len(shadow):
+                    shadow[idx] = int(value)
+
+    def _apply_master_write_updates(self, request: bytes) -> None:
+        if self._adapter is None:
+            return
+
+        touched = _extract_write_spans(request)
+        if not touched:
+            return
+
+        updates: Dict[str, List[tuple[int, int]]] = {}
+        for name in WATCH_TYPES:
+            spans = touched.get(name)
+            if not spans:
+                continue
+            table_updates = self._adapter.collect_span_updates(name, spans, self._shadow[name])
+            if table_updates:
+                updates[name] = table_updates
+
+        if not updates:
+            return
+
+        self._store.apply_index_updates(updates, track_dirty=False)
+        if self._event_sink is not None:
+            events = self._tracker.events_from_updates(updates, self._shadow)
+            if events:
+                self._event_sink(events)
+
+    def _handle_fatal_error(self, exc: Exception) -> None:
+        LOGGER.exception("Fatal Modbus backend error: %s", exc)
+        if self._error_handler is not None:
+            try:
+                self._error_handler(exc)
+            except Exception:
+                LOGGER.exception("Modbus error handler failed")
+
+    def _log_recoverable_error(self, exc: ModbusBackendError) -> None:
+        self._recoverable_error_count += 1
+        count = self._recoverable_error_count
+        if count == 1 or count == 10 or (count % 100) == 0:
+            LOGGER.warning(
+                "Recoverable Modbus %s error (%s total): %s",
+                exc.operation,
+                count,
+                exc,
+            )
+        else:
+            LOGGER.debug("Recoverable Modbus %s error: %s", exc.operation, exc)
 
     def _serve_loop(self) -> None:
         if self._adapter is None:
             return
+
         while not self._stop_event.is_set():
             try:
-                snapshot = self._store.snapshot_tables()
-                self._adapter.write_tables(snapshot)
-                self._adapter.handle_once()
-                updated = self._adapter.read_tables(names=WATCH_TYPES)
-                changes = self._tracker.diff(snapshot, updated)
-                if changes.updates:
-                    self._store.apply_index_updates(changes.updates)
-                if changes.events and self._event_sink is not None:
-                    self._event_sink(changes.events)
+                req_len, request = self._adapter.receive_request()
+                if req_len <= 0:
+                    continue
+
+                # Bring libmodbus mapping up to date right before replying.
+                self._sync_store_to_mapping()
+
+                self._adapter.reply(req_len)
+                self._apply_master_write_updates(request)
+
+            except ModbusBackendError as exc:
+                if self._stop_event.is_set() and (exc.errno_code in _STOP_INTERRUPT_ERRNOS):
+                    break
+                if not exc.fatal:
+                    self._log_recoverable_error(exc)
+                    continue
+                self._handle_fatal_error(exc)
+                break
+
             except Exception as exc:
-                LOGGER.exception("Modbus backend error: %s", exc)
-                if self._error_handler is not None:
-                    try:
-                        self._error_handler(exc)
-                    except Exception:
-                        LOGGER.exception("Modbus error handler failed")
+                self._handle_fatal_error(exc)
                 break
 
 

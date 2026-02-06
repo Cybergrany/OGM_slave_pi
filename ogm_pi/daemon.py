@@ -47,7 +47,7 @@ DEFAULT_SETTINGS = {
     "log_level": "INFO",
     "failure_log": None,
     "crash_dump_dir": None,
-    "modbus_fail_open": True,
+    "modbus_fail_open": False,
 }
 
 
@@ -347,7 +347,12 @@ def main() -> int:
     slave_address = settings.get("slave_address")
     if slave_address is None:
         slave_address = pinmap.address
-    modbus_fail_open = as_bool(settings.get("modbus_fail_open", True), default=True)
+    modbus_fail_open = as_bool(settings.get("modbus_fail_open", False), default=False)
+    if modbus_fail_open:
+        LOGGER.warning(
+            "modbus_fail_open is deprecated for fatal backend failures; "
+            "startup/severe runtime errors now fail fast."
+        )
 
     fatal_event = threading.Event()
     backend_failed = threading.Event()
@@ -364,15 +369,9 @@ def main() -> int:
             details={
                 "serial": str(settings["serial"]),
                 "slave_address": int(slave_address),
-                "fail_open": modbus_fail_open,
+                "policy": "strict-fail-on-severe",
             },
         )
-        if modbus_fail_open:
-            LOGGER.error(
-                "Modbus backend encountered a fatal error; continuing in fail-open IPC-only mode: %s",
-                exc,
-            )
-            return
         if fatal_event.is_set():
             return
         fatal_event.set()
@@ -434,11 +433,10 @@ def main() -> int:
                 details={
                     "serial": str(settings["serial"]),
                     "slave_address": int(slave_address),
-                    "fail_open": modbus_fail_open,
+                    "policy": "strict-fail-on-severe",
                 },
             )
-            if not modbus_fail_open:
-                fatal_event.set()
+            fatal_event.set()
         finally:
             backend_start_done.set()
 
@@ -447,23 +445,17 @@ def main() -> int:
     if not backend_start_done.wait(timeout=5.0):
         LOGGER.warning("Modbus backend startup is taking longer than expected; IPC remains available.")
     elif backend_start_error:
-        if modbus_fail_open:
-            LOGGER.error(
-                "Modbus backend startup failed; running in fail-open IPC-only mode. "
-                "Fix Modbus backend dependencies/config and restart service."
-            )
-        else:
-            write_crash_dump(
-                crash_dump_dir,
-                reason="modbus_startup_fatal",
-                exc=backend_start_error[0],
-                details={
-                    "serial": str(settings["serial"]),
-                    "slave_address": int(slave_address),
-                    "fail_open": modbus_fail_open,
-                },
-            )
-            raise backend_start_error[0]
+        write_crash_dump(
+            crash_dump_dir,
+            reason="modbus_startup_fatal",
+            exc=backend_start_error[0],
+            details={
+                "serial": str(settings["serial"]),
+                "slave_address": int(slave_address),
+                "policy": "strict-fail-on-severe",
+            },
+        )
+        raise backend_start_error[0]
 
     try:
         while not fatal_event.is_set():
@@ -482,7 +474,7 @@ def main() -> int:
             details={
                 "serial": str(settings["serial"]),
                 "slave_address": int(slave_address),
-                "fail_open": modbus_fail_open,
+                "policy": "strict-fail-on-severe",
             },
         )
         raise

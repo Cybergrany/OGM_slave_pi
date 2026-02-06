@@ -24,6 +24,12 @@ class RegisterStore:
         self.input_regs = [0] * int(totals.get("input_regs", 0))
         self.holding_regs = [0] * int(totals.get("holding_regs", 0))
         self._lock = threading.Lock()
+        self._dirty_updates: Dict[str, Dict[int, int]] = {
+            "coils": {},
+            "discretes": {},
+            "input_regs": {},
+            "holding_regs": {},
+        }
 
     def get_pin(self, pin: PinRecord) -> Dict[str, List[int]]:
         """Return all register values for the requested pin."""
@@ -35,13 +41,27 @@ class RegisterStore:
         with self._lock:
             for reg_name, payload in values.items():
                 if reg_name == "coils":
-                    self._write_span(self.coils, pin.coils, payload, reg_name, coerce_bit)
+                    self._write_span(self.coils, pin.coils, payload, reg_name, coerce_bit, track_dirty=True)
                 elif reg_name == "discretes":
-                    self._write_span(self.discretes, pin.discretes, payload, reg_name, coerce_bit)
+                    self._write_span(self.discretes, pin.discretes, payload, reg_name, coerce_bit, track_dirty=True)
                 elif reg_name == "input_regs":
-                    self._write_span(self.input_regs, pin.input_regs, payload, reg_name, coerce_reg)
+                    self._write_span(
+                        self.input_regs,
+                        pin.input_regs,
+                        payload,
+                        reg_name,
+                        coerce_reg,
+                        track_dirty=True,
+                    )
                 elif reg_name == "holding_regs":
-                    self._write_span(self.holding_regs, pin.holding_regs, payload, reg_name, coerce_reg)
+                    self._write_span(
+                        self.holding_regs,
+                        pin.holding_regs,
+                        payload,
+                        reg_name,
+                        coerce_reg,
+                        track_dirty=True,
+                    )
                 else:
                     raise ValueError(f"Unknown register type '{reg_name}'")
             return self._get_pin_unlocked(pin)
@@ -56,21 +76,57 @@ class RegisterStore:
                 "holding_regs": list(self.holding_regs),
             }
 
-    def update_tables(self, tables: Dict[str, List[int]]) -> None:
+    def update_tables(self, tables: Dict[str, List[int]], *, track_dirty: bool = True) -> None:
         """Replace register tables from a Modbus backend snapshot."""
         with self._lock:
-            self._apply_table(self.coils, tables.get("coils"), coerce_bit, "coils")
-            self._apply_table(self.discretes, tables.get("discretes"), coerce_bit, "discretes")
-            self._apply_table(self.input_regs, tables.get("input_regs"), coerce_reg, "input_regs")
-            self._apply_table(self.holding_regs, tables.get("holding_regs"), coerce_reg, "holding_regs")
+            self._apply_table(self.coils, tables.get("coils"), coerce_bit, "coils", track_dirty=track_dirty)
+            self._apply_table(self.discretes, tables.get("discretes"), coerce_bit, "discretes", track_dirty=track_dirty)
+            self._apply_table(
+                self.input_regs,
+                tables.get("input_regs"),
+                coerce_reg,
+                "input_regs",
+                track_dirty=track_dirty,
+            )
+            self._apply_table(
+                self.holding_regs,
+                tables.get("holding_regs"),
+                coerce_reg,
+                "holding_regs",
+                track_dirty=track_dirty,
+            )
 
-    def apply_index_updates(self, updates: Dict[str, List[tuple[int, int]]]) -> None:
+    def apply_index_updates(self, updates: Dict[str, List[tuple[int, int]]], *, track_dirty: bool = True) -> None:
         """Apply sparse index updates (used for Modbus-originated changes)."""
         with self._lock:
-            self._apply_index_updates(self.coils, updates.get("coils"), coerce_bit, "coils")
-            self._apply_index_updates(self.discretes, updates.get("discretes"), coerce_bit, "discretes")
-            self._apply_index_updates(self.input_regs, updates.get("input_regs"), coerce_reg, "input_regs")
-            self._apply_index_updates(self.holding_regs, updates.get("holding_regs"), coerce_reg, "holding_regs")
+            self._apply_index_updates(
+                self.coils,
+                updates.get("coils"),
+                coerce_bit,
+                "coils",
+                track_dirty=track_dirty,
+            )
+            self._apply_index_updates(
+                self.discretes,
+                updates.get("discretes"),
+                coerce_bit,
+                "discretes",
+                track_dirty=track_dirty,
+            )
+            self._apply_index_updates(
+                self.input_regs,
+                updates.get("input_regs"),
+                coerce_reg,
+                "input_regs",
+                track_dirty=track_dirty,
+            )
+            self._apply_index_updates(
+                self.holding_regs,
+                updates.get("holding_regs"),
+                coerce_reg,
+                "holding_regs",
+                track_dirty=track_dirty,
+            )
 
     def read_registers(self, reg_name: str, span: RegSpan) -> List[int]:
         """Read a span from a register table by name."""
@@ -82,7 +138,20 @@ class RegisterStore:
         """Write a span to a register table by name."""
         with self._lock:
             buffer, coercer = self._select_buffer(reg_name, with_coercer=True)
-            self._write_span(buffer, span, payload, reg_name, coercer)
+            self._write_span(buffer, span, payload, reg_name, coercer, track_dirty=True)
+
+    def consume_dirty_updates(self, names: List[str] | tuple[str, ...] | None = None) -> Dict[str, List[tuple[int, int]]]:
+        """Return and clear pending sparse updates since the last consume."""
+        with self._lock:
+            selected = names if names is not None else tuple(self._dirty_updates.keys())
+            consumed: Dict[str, List[tuple[int, int]]] = {}
+            for name in selected:
+                pending = self._dirty_updates.get(name)
+                if not pending:
+                    continue
+                consumed[name] = sorted(pending.items())
+                pending.clear()
+            return consumed
 
     def _get_pin_unlocked(self, pin: PinRecord) -> Dict[str, List[int]]:
         """Return pin values without acquiring the lock (caller holds lock)."""
@@ -118,8 +187,14 @@ class RegisterStore:
         lo = value & 0xFFFF
         hi = (value >> 16) & 0xFFFF
         with self._lock:
-            self.input_regs[pin.input_regs.start] = lo
-            self.input_regs[pin.input_regs.start + 1] = hi
+            idx0 = pin.input_regs.start
+            idx1 = idx0 + 1
+            if self.input_regs[idx0] != lo:
+                self.input_regs[idx0] = lo
+                self._record_update_unlocked("input_regs", idx0, lo)
+            if self.input_regs[idx1] != hi:
+                self.input_regs[idx1] = hi
+                self._record_update_unlocked("input_regs", idx1, hi)
 
     @staticmethod
     def _read_span(buffer: List[int], span: RegSpan) -> List[int]:
@@ -128,20 +203,28 @@ class RegisterStore:
             return []
         return list(buffer[span.start : span.start + span.count])
 
-    @staticmethod
     def _write_span(
+        self,
         buffer: List[int],
         span: RegSpan,
         payload: Any,
         reg_name: str,
         coercer,
+        *,
+        track_dirty: bool,
     ) -> None:
         """Write a span to a register buffer, validating size and type."""
         if span.count == 0:
             raise ValueError(f"Pin has no {reg_name} span")
         values = normalize_values(payload, span.count)
         coerced = [coercer(v) for v in values]
-        buffer[span.start : span.start + span.count] = coerced
+        for offset, value in enumerate(coerced):
+            idx = span.start + offset
+            if buffer[idx] == value:
+                continue
+            buffer[idx] = value
+            if track_dirty:
+                self._record_update_unlocked(reg_name, idx, value)
 
     def _select_buffer(self, reg_name: str, with_coercer: bool = False):
         """Return the backing buffer (and coercer optionally) for a register table name."""
@@ -155,21 +238,36 @@ class RegisterStore:
             return (self.holding_regs, coerce_reg) if with_coercer else self.holding_regs
         raise ValueError(f"Unknown register type '{reg_name}'")
 
-    @staticmethod
-    def _apply_table(buffer: List[int], values: List[Any] | None, coercer, name: str) -> None:
+    def _apply_table(
+        self,
+        buffer: List[int],
+        values: List[Any] | None,
+        coercer,
+        name: str,
+        *,
+        track_dirty: bool,
+    ) -> None:
         """Replace a full register table with validated values."""
         if values is None:
             return
         if len(values) != len(buffer):
             raise ValueError(f"Expected {len(buffer)} {name} entries, got {len(values)}")
-        buffer[:] = [coercer(v) for v in values]
+        coerced = [coercer(v) for v in values]
+        for idx, value in enumerate(coerced):
+            if buffer[idx] == value:
+                continue
+            buffer[idx] = value
+            if track_dirty:
+                self._record_update_unlocked(name, idx, value)
 
-    @staticmethod
     def _apply_index_updates(
+        self,
         buffer: List[int],
         updates: List[tuple[int, int]] | None,
         coercer,
         name: str,
+        *,
+        track_dirty: bool,
     ) -> None:
         """Apply sparse updates to a register buffer."""
         if not updates:
@@ -178,7 +276,18 @@ class RegisterStore:
         for idx, value in updates:
             if idx < 0 or idx > max_index:
                 raise ValueError(f"Index {idx} out of range for {name} table")
-            buffer[idx] = coercer(value)
+            coerced = coercer(value)
+            if buffer[idx] == coerced:
+                continue
+            buffer[idx] = coerced
+            if track_dirty:
+                self._record_update_unlocked(name, idx, coerced)
+
+    def _record_update_unlocked(self, table: str, idx: int, value: int) -> None:
+        pending = self._dirty_updates.get(table)
+        if pending is None:
+            return
+        pending[idx] = int(value)
 
 
 def normalize_values(payload: Any, expected: int) -> List[Any]:
