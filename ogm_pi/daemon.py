@@ -147,6 +147,8 @@ def resolve_failure_log_path(settings: dict) -> str | None:
     # In deploy layout WorkingDirectory=<root>/runtime, so this lands in
     # <root>/runtime_failures.log for easy retrieval.
     candidates.append(str((Path.cwd().parent / "runtime_failures.log").resolve()))
+    # Fallback that remains inside service-owned runtime dir.
+    candidates.append(str((Path.cwd() / "runtime_failures.log").resolve()))
     candidates.append("/tmp/ogm_pi_runtime_failures.log")
 
     seen: set[str] = set()
@@ -179,6 +181,8 @@ def resolve_crash_dump_dir(settings: dict) -> str | None:
     # In deploy layout WorkingDirectory=<root>/runtime, so this lands in
     # <root>/crash_dumps for easy retrieval.
     candidates.append(str((Path.cwd().parent / "crash_dumps").resolve()))
+    # Fallback that remains inside service-owned runtime dir.
+    candidates.append(str((Path.cwd() / "crash_dumps").resolve()))
     candidates.append("/tmp/ogm_pi_crash_dumps")
 
     seen: set[str] = set()
@@ -382,9 +386,12 @@ def main() -> int:
         if shutdown_once.is_set():
             return
         shutdown_once.set()
+        fatal_event.set()
         LOGGER.info("Shutting down")
         runtime.force_safe_outputs("shutdown")
         server.stop()
+        if ipc_thread.is_alive():
+            ipc_thread.join(timeout=1.0)
         runtime.stop()
         backend.stop()
         gpio.close()

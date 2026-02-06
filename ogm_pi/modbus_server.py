@@ -260,8 +260,11 @@ class PylibmodbusAdapter:
 
     def _server_ctor_variants(self, serial: str, baud: int, parity: str, data_bits: int, stop_bits: int):
         kwargs_common = {"parity": parity, "data_bits": data_bits, "stop_bits": stop_bits}
+        kwargs_common_alt = {"parity": parity, "data_bit": data_bits, "stop_bit": stop_bits}
         return [
             ("positional", (serial, baud, parity, data_bits, stop_bits), {}),
+            ("positional-legacy", (serial, baud, parity, data_bits, stop_bits, 0), {}),
+            ("positional-minimal", (serial, baud, parity), {}),
             (
                 "serial+baudrate",
                 (),
@@ -278,6 +281,15 @@ class PylibmodbusAdapter:
                     "serial": serial,
                     "baud": baud,
                     **kwargs_common,
+                },
+            ),
+            (
+                "serial+baud-legacy-bits",
+                (),
+                {
+                    "serial": serial,
+                    "baud": baud,
+                    **kwargs_common_alt,
                 },
             ),
             (
@@ -314,6 +326,15 @@ class PylibmodbusAdapter:
                     "device": serial,
                     "baud": baud,
                     **kwargs_common,
+                },
+            ),
+            (
+                "device+baud-legacy-bits",
+                (),
+                {
+                    "device": serial,
+                    "baud": baud,
+                    **kwargs_common_alt,
                 },
             ),
         ]

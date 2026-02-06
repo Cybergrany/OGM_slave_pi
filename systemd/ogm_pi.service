@@ -3,6 +3,8 @@
 Description=OGM Pi Modbus RTU + IPC Daemon
 Requires=ogm_pi.socket
 After=ogm_pi.socket
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -13,8 +15,6 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/OGM_slave_pi/.venv/bin/python -m ogm_pi.daemon --config /etc/ogm_pi/ogm_pi.yaml
 Restart=always
 RestartSec=2
-StartLimitIntervalSec=60
-StartLimitBurst=5
 TimeoutStopSec=5
 NoNewPrivileges=yes
 PrivateTmp=yes

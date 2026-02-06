@@ -8,6 +8,7 @@ import os
 import queue
 import socket
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional, Set
 
@@ -71,13 +72,23 @@ class IPCServer:
     def serve_forever(self) -> None:
         """Start accepting connections and processing JSON requests."""
         self._sock = self._get_listening_socket()
+        self._sock.settimeout(1.0)
         LOGGER.info("IPC listening on %s", self._socket_path)
 
         while not self._stop_event.is_set():
             try:
                 conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
+            except BlockingIOError:
+                time.sleep(0.05)
+                continue
             except OSError:
-                break
+                if self._stop_event.is_set():
+                    break
+                LOGGER.exception("IPC accept failed; retrying")
+                time.sleep(0.1)
+                continue
             thread = threading.Thread(target=self._handle_client, args=(conn,), daemon=True)
             thread.start()
 
@@ -85,6 +96,10 @@ class IPCServer:
         """Stop accepting new connections and close the listening socket."""
         self._stop_event.set()
         if self._sock is not None:
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             try:
                 self._sock.close()
             except OSError:
