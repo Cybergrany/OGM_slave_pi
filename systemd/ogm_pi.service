@@ -24,7 +24,7 @@ ProtectControlGroups=yes
 ProtectKernelLogs=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
-SupplementaryGroups=gpio,dialout
+SupplementaryGroups=gpio dialout
 
 [Install]
 WantedBy=multi-user.target
