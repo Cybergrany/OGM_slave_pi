@@ -11,6 +11,7 @@ import os
 import signal
 import sys
 import threading
+import time
 from pathlib import Path
 
 import yaml
@@ -168,9 +169,18 @@ def main() -> int:
         event_sink=server.publish_events,
         error_handler=on_modbus_error,
     )
-    backend.start()
+
+    # Start IPC serving early so local health checks remain responsive even if
+    # Modbus startup blocks on serial/device state.
+    ipc_thread = threading.Thread(target=server.serve_forever, name="ogm_ipc", daemon=True)
+    ipc_thread.start()
+
+    shutdown_once = threading.Event()
 
     def shutdown(_signum=None, _frame=None):
+        if shutdown_once.is_set():
+            return
+        shutdown_once.set()
         LOGGER.info("Shutting down")
         runtime.force_safe_outputs("shutdown")
         server.stop()
@@ -181,8 +191,31 @@ def main() -> int:
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
+    backend_start_error: list[Exception] = []
+    backend_start_done = threading.Event()
+
+    def start_backend_async() -> None:
+        try:
+            backend.start()
+        except Exception as exc:
+            LOGGER.exception("Modbus backend failed to start")
+            backend_start_error.append(exc)
+            fatal_event.set()
+        finally:
+            backend_start_done.set()
+
+    backend_start_thread = threading.Thread(target=start_backend_async, name="ogm_modbus_start", daemon=True)
+    backend_start_thread.start()
+    if not backend_start_done.wait(timeout=5.0):
+        LOGGER.warning("Modbus backend startup is taking longer than expected; IPC remains available.")
+    elif backend_start_error:
+        raise backend_start_error[0]
+
     try:
-        server.serve_forever()
+        while not fatal_event.is_set():
+            if not ipc_thread.is_alive():
+                break
+            time.sleep(0.25)
     finally:
         shutdown()
     return 0
