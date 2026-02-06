@@ -43,6 +43,7 @@ DEFAULT_SETTINGS = {
     "pin_poll_ms": 20,
     "stats_interval": 5.0,
     "log_level": "INFO",
+    "failure_log": None,
 }
 
 
@@ -65,6 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pin-poll-ms", type=int, help="Pin update poll interval (ms)")
     parser.add_argument("--stats-interval", type=float, help="Board stats update interval (s)")
     parser.add_argument("--log-level", help="Logging level (DEBUG, INFO, WARNING)")
+    parser.add_argument("--failure-log", help="Path to append daemon failure/runtime logs")
     return parser.parse_args()
 
 
@@ -99,9 +101,60 @@ def build_settings(config: dict, cli: argparse.Namespace) -> dict:
     return settings
 
 
-def configure_logging(level: str) -> None:
-    """Set up basic logging for the daemon."""
-    logging.basicConfig(level=getattr(logging, level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
+def resolve_failure_log_path(settings: dict) -> str | None:
+    """Pick a writable runtime failure log path."""
+    candidates: list[str] = []
+    cfg = settings.get("failure_log")
+    if cfg:
+        candidates.append(str(cfg))
+
+    env = os.environ.get("OGM_PI_FAILURE_LOG")
+    if env:
+        candidates.append(env)
+
+    # In deploy layout WorkingDirectory=<root>/runtime, so this lands in
+    # <root>/runtime_failures.log for easy retrieval.
+    candidates.append(str((Path.cwd().parent / "runtime_failures.log").resolve()))
+    candidates.append("/tmp/ogm_pi_runtime_failures.log")
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        path = Path(candidate)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8"):
+                pass
+            return str(path)
+        except OSError:
+            continue
+    return None
+
+
+def configure_logging(level: str, *, failure_log: str | None = None) -> None:
+    """Set up daemon logging (stderr + optional persistent failure file)."""
+    level_value = getattr(logging, level.upper(), logging.INFO)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+
+    root = logging.getLogger()
+    root.setLevel(level_value)
+    root.handlers.clear()
+
+    stream = logging.StreamHandler()
+    stream.setLevel(level_value)
+    stream.setFormatter(fmt)
+    root.addHandler(stream)
+
+    if failure_log:
+        try:
+            file_handler = logging.FileHandler(failure_log, encoding="utf-8")
+            file_handler.setLevel(level_value)
+            file_handler.setFormatter(fmt)
+            root.addHandler(file_handler)
+        except OSError as exc:
+            root.warning("Could not open failure log at %s: %s", failure_log, exc)
 
 
 def main() -> int:
@@ -109,7 +162,12 @@ def main() -> int:
     args = parse_args()
     config = load_config(getattr(args, "config", DEFAULT_CONFIG_PATH))
     settings = build_settings(config, args)
-    configure_logging(str(settings.get("log_level", "INFO")))
+    failure_log = resolve_failure_log_path(settings)
+    configure_logging(str(settings.get("log_level", "INFO")), failure_log=failure_log)
+    if failure_log:
+        LOGGER.info("Persistent runtime/failure log: %s", failure_log)
+    else:
+        LOGGER.warning("No writable persistent runtime/failure log path found.")
 
     if not settings.get("pinmap"):
         raise SystemExit("ogm_pi: pinmap path missing (set in config or pass --pinmap)")
@@ -222,4 +280,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception:
+        LOGGER.exception("Fatal daemon error")
+        raise
