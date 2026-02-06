@@ -29,6 +29,11 @@ That helper exports pinmaps from master source-of-truth files, bundles custom
 Pi pin handlers from `OGM_The_Core/Defines/CustomSlaveDefines/slave_pi`,
 uploads the runtime/config payload to the Pi, and runs install or sync actions.
 
+In Desktop deploy layout (`/home/<user>/Desktop/OGM_slave_pi`), daemon runtime
+logs and crash dumps are persisted under:
+- `runtime_failures.log`
+- `crash_dumps/` (timestamped dumps + `latest.log`)
+
 ## Installation (Pi)
 
 1) **Install system dependencies** (libmodbus runtime + headers + libgpiod bindings):

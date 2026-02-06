@@ -6,12 +6,14 @@ Starts the Modbus backend (if enabled) and the IPC server for local clients.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import logging
 import os
 import signal
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
 import yaml
@@ -44,6 +46,7 @@ DEFAULT_SETTINGS = {
     "stats_interval": 5.0,
     "log_level": "INFO",
     "failure_log": None,
+    "crash_dump_dir": None,
     "modbus_fail_open": True,
 }
 
@@ -68,6 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stats-interval", type=float, help="Board stats update interval (s)")
     parser.add_argument("--log-level", help="Logging level (DEBUG, INFO, WARNING)")
     parser.add_argument("--failure-log", help="Path to append daemon failure/runtime logs")
+    parser.add_argument("--crash-dump-dir", help="Directory for crash dump files")
     parser.add_argument(
         "--modbus-fail-open",
         dest="modbus_fail_open",
@@ -161,6 +165,91 @@ def resolve_failure_log_path(settings: dict) -> str | None:
     return None
 
 
+def resolve_crash_dump_dir(settings: dict) -> str | None:
+    """Pick a writable crash-dump directory."""
+    candidates: list[str] = []
+    cfg = settings.get("crash_dump_dir")
+    if cfg:
+        candidates.append(str(cfg))
+
+    env = os.environ.get("OGM_PI_CRASH_DUMP_DIR")
+    if env:
+        candidates.append(env)
+
+    # In deploy layout WorkingDirectory=<root>/runtime, so this lands in
+    # <root>/crash_dumps for easy retrieval.
+    candidates.append(str((Path.cwd().parent / "crash_dumps").resolve()))
+    candidates.append("/tmp/ogm_pi_crash_dumps")
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        directory = Path(candidate)
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            probe = directory / ".write_test"
+            with probe.open("a", encoding="utf-8"):
+                pass
+            probe.unlink(missing_ok=True)
+            return str(directory)
+        except OSError:
+            continue
+    return None
+
+
+def write_crash_dump(
+    crash_dump_dir: str | None,
+    *,
+    reason: str,
+    exc: BaseException | None = None,
+    details: dict[str, object] | None = None,
+) -> None:
+    """Write a structured crash dump and append to latest.log."""
+    if not crash_dump_dir:
+        return
+    timestamp = datetime.now(timezone.utc).isoformat()
+    safe_reason = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in reason).strip("_") or "error"
+    ts_file = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    dump_dir = Path(crash_dump_dir)
+    dump_path = dump_dir / f"{ts_file}_{safe_reason}.log"
+    latest_path = dump_dir / "latest.log"
+
+    lines = [
+        f"timestamp: {timestamp}",
+        f"reason: {reason}",
+        f"pid: {os.getpid()}",
+        f"cwd: {Path.cwd()}",
+        f"python: {sys.executable}",
+    ]
+    if details:
+        for key in sorted(details):
+            lines.append(f"{key}: {details[key]}")
+    if exc is not None:
+        lines.extend(
+            [
+                "",
+                f"exception_type: {type(exc).__name__}",
+                f"exception: {exc}",
+                "",
+                "traceback:",
+                "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip(),
+            ]
+        )
+
+    payload = "\n".join(lines).rstrip() + "\n"
+    try:
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        with dump_path.open("w", encoding="utf-8") as handle:
+            handle.write(payload)
+        with latest_path.open("a", encoding="utf-8") as handle:
+            handle.write("\n===\n")
+            handle.write(payload)
+    except OSError as dump_exc:
+        LOGGER.error("Failed to write crash dump to %s: %s", dump_dir, dump_exc)
+
+
 def configure_logging(level: str, *, failure_log: str | None = None) -> None:
     """Set up daemon logging (stderr + optional persistent failure file)."""
     level_value = getattr(logging, level.upper(), logging.INFO)
@@ -191,11 +280,16 @@ def main() -> int:
     config = load_config(getattr(args, "config", DEFAULT_CONFIG_PATH))
     settings = build_settings(config, args)
     failure_log = resolve_failure_log_path(settings)
+    crash_dump_dir = resolve_crash_dump_dir(settings)
     configure_logging(str(settings.get("log_level", "INFO")), failure_log=failure_log)
     if failure_log:
         LOGGER.info("Persistent runtime/failure log: %s", failure_log)
     else:
         LOGGER.warning("No writable persistent runtime/failure log path found.")
+    if crash_dump_dir:
+        LOGGER.info("Crash dump directory: %s", crash_dump_dir)
+    else:
+        LOGGER.warning("No writable crash dump directory found.")
 
     if not settings.get("pinmap"):
         raise SystemExit("ogm_pi: pinmap path missing (set in config or pass --pinmap)")
@@ -242,6 +336,16 @@ def main() -> int:
             return
         backend_failed.set()
         runtime.force_safe_outputs("modbus_error")
+        write_crash_dump(
+            crash_dump_dir,
+            reason="modbus_runtime_error",
+            exc=exc,
+            details={
+                "serial": str(settings["serial"]),
+                "slave_address": int(slave_address),
+                "fail_open": modbus_fail_open,
+            },
+        )
         if modbus_fail_open:
             LOGGER.error(
                 "Modbus backend encountered a fatal error; continuing in fail-open IPC-only mode: %s",
@@ -299,6 +403,16 @@ def main() -> int:
             backend_start_error.append(exc)
             backend_failed.set()
             runtime.force_safe_outputs("modbus_start_failed")
+            write_crash_dump(
+                crash_dump_dir,
+                reason="modbus_startup_error",
+                exc=exc,
+                details={
+                    "serial": str(settings["serial"]),
+                    "slave_address": int(slave_address),
+                    "fail_open": modbus_fail_open,
+                },
+            )
             if not modbus_fail_open:
                 fatal_event.set()
         finally:
@@ -315,6 +429,16 @@ def main() -> int:
                 "Fix Modbus backend dependencies/config and restart service."
             )
         else:
+            write_crash_dump(
+                crash_dump_dir,
+                reason="modbus_startup_fatal",
+                exc=backend_start_error[0],
+                details={
+                    "serial": str(settings["serial"]),
+                    "slave_address": int(slave_address),
+                    "fail_open": modbus_fail_open,
+                },
+            )
             raise backend_start_error[0]
 
     try:
@@ -322,6 +446,18 @@ def main() -> int:
             if not ipc_thread.is_alive():
                 break
             time.sleep(0.25)
+    except Exception as exc:
+        write_crash_dump(
+            crash_dump_dir,
+            reason="daemon_main_error",
+            exc=exc,
+            details={
+                "serial": str(settings["serial"]),
+                "slave_address": int(slave_address),
+                "fail_open": modbus_fail_open,
+            },
+        )
+        raise
     finally:
         shutdown()
     return 0
