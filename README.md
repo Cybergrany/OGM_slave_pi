@@ -220,6 +220,12 @@ sudo ./scripts/install_pi.sh --uninstall
 
 # Remove units and purge install/config dirs
 sudo ./scripts/install_pi.sh --uninstall --purge
+
+# Desktop deploy-layout cleanup (service + runtime/config/incoming/staging)
+sudo ./scripts/uninstall.sh
+
+# Also remove deploy/runtime failure logs under Desktop/OGM_slave_pi
+sudo ./scripts/uninstall.sh --delete-logs
 ```
 
 `--write-config` (or any config override flag) rewrites `ogm_pi.yaml` using defaults.
