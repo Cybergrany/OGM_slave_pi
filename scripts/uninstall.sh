@@ -122,6 +122,15 @@ run_cmd_allow_fail() {
   "$@" || true
 }
 
+run_cmd_allow_fail_quiet() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    print_cmd "$@"
+    printf '  (allowed to fail, quiet)\n'
+    return 0
+  fi
+  "$@" >/dev/null 2>&1 || true
+}
+
 echo "Cleaning OGM_slave_pi deploy artifacts"
 echo "  root: ${ROOT_DIR}"
 echo "  socket: ${SOCKET_PATH}"
@@ -134,7 +143,7 @@ if command -v systemctl >/dev/null 2>&1; then
   run_cmd rm -f /etc/systemd/system/ogm_pi.service /etc/systemd/system/ogm_pi.socket
   run_cmd rm -rf /etc/systemd/system/ogm_pi.service.d
   run_cmd systemctl daemon-reload
-  run_cmd_allow_fail systemctl reset-failed ogm_pi.service ogm_pi.socket
+  run_cmd_allow_fail_quiet systemctl reset-failed ogm_pi.service ogm_pi.socket
 else
   echo "Warning: systemctl not found, skipping systemd cleanup." >&2
 fi
