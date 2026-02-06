@@ -262,13 +262,21 @@ class PylibmodbusAdapter:
         kwargs_common = {"parity": parity, "data_bits": data_bits, "stop_bits": stop_bits}
         kwargs_common_alt = {"parity": parity, "data_bit": data_bits, "stop_bit": stop_bits}
         serial_bytes = serial.encode("utf-8")
+        parity_bytes = parity.encode("utf-8")[:1] if parity else b"N"
+        kwargs_common_alt_bytes = {"parity": parity_bytes, "data_bit": data_bits, "stop_bit": stop_bits}
         return [
             ("positional", (serial, baud, parity, data_bits, stop_bits), {}),
+            ("positional-parity-bytes", (serial, baud, parity_bytes, data_bits, stop_bits), {}),
             ("positional-bytes", (serial_bytes, baud, parity, data_bits, stop_bits), {}),
+            ("positional-bytes-parity-bytes", (serial_bytes, baud, parity_bytes, data_bits, stop_bits), {}),
             ("positional-legacy", (serial, baud, parity, data_bits, stop_bits, 0), {}),
+            ("positional-legacy-parity-bytes", (serial, baud, parity_bytes, data_bits, stop_bits, 0), {}),
             ("positional-legacy-bytes", (serial_bytes, baud, parity, data_bits, stop_bits, 0), {}),
+            ("positional-legacy-bytes-parity-bytes", (serial_bytes, baud, parity_bytes, data_bits, stop_bits, 0), {}),
             ("positional-minimal", (serial, baud, parity), {}),
+            ("positional-minimal-parity-bytes", (serial, baud, parity_bytes), {}),
             ("positional-minimal-bytes", (serial_bytes, baud, parity), {}),
+            ("positional-minimal-bytes-parity-bytes", (serial_bytes, baud, parity_bytes), {}),
             (
                 "serial+baudrate",
                 (),
@@ -303,6 +311,15 @@ class PylibmodbusAdapter:
                     "serial": serial_bytes,
                     "baud": baud,
                     **kwargs_common_alt,
+                },
+            ),
+            (
+                "serial-bytes+baud-legacy-bits-parity-bytes",
+                (),
+                {
+                    "serial": serial_bytes,
+                    "baud": baud,
+                    **kwargs_common_alt_bytes,
                 },
             ),
             (
@@ -366,6 +383,15 @@ class PylibmodbusAdapter:
                     "device": serial_bytes,
                     "baud": baud,
                     **kwargs_common_alt,
+                },
+            ),
+            (
+                "device-bytes+baud-legacy-bits-parity-bytes",
+                (),
+                {
+                    "device": serial_bytes,
+                    "baud": baud,
+                    **kwargs_common_alt_bytes,
                 },
             ),
         ]

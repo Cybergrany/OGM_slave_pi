@@ -735,6 +735,10 @@ fi
 chown -R ogm_pi:ogm "$TARGET_DIR"
 mkdir -p "${TARGET_DIR}/crash_dumps"
 chown ogm_pi:ogm "${TARGET_DIR}/crash_dumps"
+chmod 0755 "${TARGET_DIR}/crash_dumps"
+touch "${TARGET_DIR}/runtime_failures.log"
+chown ogm_pi:ogm "${TARGET_DIR}/runtime_failures.log"
+chmod 0644 "${TARGET_DIR}/runtime_failures.log"
 if [[ -d "$CUSTOM_TYPES_DIR" ]]; then
   chown -R ogm_pi:ogm "$CUSTOM_TYPES_DIR"
 fi

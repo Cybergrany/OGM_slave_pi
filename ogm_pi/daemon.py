@@ -245,11 +245,24 @@ def write_crash_dump(
     payload = "\n".join(lines).rstrip() + "\n"
     try:
         dump_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            dump_dir.chmod(0o755)
+        except OSError:
+            pass
         with dump_path.open("w", encoding="utf-8") as handle:
             handle.write(payload)
+        try:
+            dump_path.chmod(0o644)
+        except OSError:
+            pass
         with latest_path.open("a", encoding="utf-8") as handle:
             handle.write("\n===\n")
             handle.write(payload)
+        try:
+            latest_path.chmod(0o644)
+        except OSError:
+            pass
+        LOGGER.error("Crash dump written: %s", dump_path)
     except OSError as dump_exc:
         LOGGER.error("Failed to write crash dump to %s: %s", dump_dir, dump_exc)
 
@@ -274,6 +287,10 @@ def configure_logging(level: str, *, failure_log: str | None = None) -> None:
             file_handler.setLevel(level_value)
             file_handler.setFormatter(fmt)
             root.addHandler(file_handler)
+            try:
+                Path(failure_log).chmod(0o644)
+            except OSError:
+                pass
         except OSError as exc:
             root.warning("Could not open failure log at %s: %s", failure_log, exc)
 
