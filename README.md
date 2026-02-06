@@ -34,7 +34,8 @@ uploads the runtime/config payload to the Pi, and runs install or sync actions.
 1) **Install system dependencies** (libmodbus runtime + headers + libgpiod bindings):
 ```bash
 sudo apt-get update
-sudo apt-get install -y libmodbus libmodbus-dev python3-libgpiod
+sudo apt-get install -y libmodbus5 libmodbus-dev python3-libgpiod \
+  || sudo apt-get install -y libmodbus libmodbus-dev python3-gpiod
 ```
 
 2) **Create a virtualenv and install Python deps**:

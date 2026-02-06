@@ -494,6 +494,22 @@ validate_devices() {
   fi
 }
 
+apt_has_package() {
+  local pkg="$1"
+  apt-cache show "$pkg" >/dev/null 2>&1
+}
+
+pick_first_available_pkg() {
+  local pkg
+  for pkg in "$@"; do
+    if apt_has_package "$pkg"; then
+      echo "$pkg"
+      return 0
+    fi
+  done
+  return 1
+}
+
 generate_pinmap() {
   if [[ -n "$PINMAP_SRC" ]]; then
     backup_file "$PINMAP_FILE"
@@ -606,12 +622,22 @@ uart_preflight
 
 if [[ "$SKIP_APT" != "true" ]]; then
   apt-get update
+  MODBUS_RUNTIME_PKG="$(pick_first_available_pkg libmodbus libmodbus5 || true)"
+  if [[ -z "$MODBUS_RUNTIME_PKG" ]]; then
+    echo "ERROR: Could not find a libmodbus runtime package (tried: libmodbus, libmodbus5)." >&2
+    exit 1
+  fi
+  GPIO_PY_PKG="$(pick_first_available_pkg python3-libgpiod python3-gpiod || true)"
+  if [[ -z "$GPIO_PY_PKG" ]]; then
+    echo "ERROR: Could not find a Python gpiod package (tried: python3-libgpiod, python3-gpiod)." >&2
+    exit 1
+  fi
   apt-get install -y \
-    libmodbus \
+    "$MODBUS_RUNTIME_PKG" \
     libmodbus-dev \
     python3 \
     python3-venv \
-    python3-libgpiod
+    "$GPIO_PY_PKG"
 fi
 
 ensure_group_user
