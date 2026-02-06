@@ -519,7 +519,9 @@ validate_devices() {
 
 apt_has_package() {
   local pkg="$1"
-  apt-cache show "$pkg" >/dev/null 2>&1
+  local candidate
+  candidate="$(apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/{print $2; exit}')"
+  [[ -n "$candidate" && "$candidate" != "(none)" ]]
 }
 
 pick_first_available_pkg() {
@@ -645,9 +647,9 @@ uart_preflight
 
 if [[ "$SKIP_APT" != "true" ]]; then
   apt-get update
-  MODBUS_RUNTIME_PKG="$(pick_first_available_pkg libmodbus libmodbus5 || true)"
+  MODBUS_RUNTIME_PKG="$(pick_first_available_pkg libmodbus5 libmodbus || true)"
   if [[ -z "$MODBUS_RUNTIME_PKG" ]]; then
-    echo "ERROR: Could not find a libmodbus runtime package (tried: libmodbus, libmodbus5)." >&2
+    echo "ERROR: Could not find a libmodbus runtime package (tried: libmodbus5, libmodbus)." >&2
     exit 1
   fi
   GPIO_PY_PKG="$(pick_first_available_pkg python3-libgpiod python3-gpiod || true)"
