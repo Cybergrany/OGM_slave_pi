@@ -185,6 +185,7 @@ installs the venv, writes `/etc/ogm_pi/ogm_pi.yaml`, exports a pinmap to
 
 By default, the installer now prompts:
 - `Use default install config for GPIO14/15 RS485 [Y/n]`
+- `Disable Bluetooth and dedicate serial0 to GPIO14/15 (recommended) [Y/n]`
 
 If accepted (default), it uses `/dev/serial0` and applies UART compatibility
 checks/fixes (`--uart-fix`) for better Modbus RTU reliability on Pi UART pins.
@@ -192,7 +193,7 @@ Use `--no-default-install-config` and/or `--no-uart-fix` to opt out.
 
 UART preflight/fix behavior (for `/dev/serial*`, `/dev/ttyAMA*`, `/dev/ttyS*`):
 - Reports resolved UART mapping (`readlink -f`), serial-getty status, and cmdline serial console state.
-- With `--uart-fix` (default), applies compatibility updates (enable UART, disable serial console/getty, disable bt UART service).
+- With `--uart-fix` (default), applies compatibility updates (enable UART, disable serial console/getty; optionally disable bt UART service when dedicated serial0 mode is accepted).
 - If UART boot settings are changed, installer marks reboot required, enables units, and skips immediate service restart.
 - Hard-fails if parity `E/O` is requested while selected UART resolves to `ttyS*` (mini UART).
 

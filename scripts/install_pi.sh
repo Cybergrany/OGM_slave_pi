@@ -327,7 +327,7 @@ uart_preflight() {
     return
   fi
 
-  local serial_target serial0_target boot_cfg cmdline_cfg getty_active cmdline_console parity_upper
+  local serial_target serial0_target boot_cfg cmdline_cfg getty_active cmdline_console parity_upper dedicate_serial0
   serial_target="$(readlink -f "$SERIAL" 2>/dev/null || true)"
   if [[ -z "$serial_target" ]]; then
     serial_target="$SERIAL"
@@ -338,6 +338,7 @@ uart_preflight() {
   parity_upper="${PARITY^^}"
   getty_active="no"
   cmdline_console="no"
+  dedicate_serial0="yes"
 
   if command -v systemctl >/dev/null 2>&1; then
     if systemctl is-enabled --quiet serial-getty@serial0.service 2>/dev/null \
@@ -368,6 +369,16 @@ uart_preflight() {
   echo "  serial-getty@serial0 active/enabled: ${getty_active}"
 
   if [[ "$UART_FIX" == "true" ]]; then
+    if [[ -t 0 ]]; then
+      local reply
+      read -r -p "Disable Bluetooth and dedicate serial0 to GPIO14/15 (recommended) [Y/n]: " reply
+      case "${reply,,}" in
+        ""|y|yes) dedicate_serial0="yes" ;;
+        n|no) dedicate_serial0="no" ;;
+        *) echo "Invalid response '${reply}', using default: yes"; dedicate_serial0="yes" ;;
+      esac
+    fi
+
     echo "Applying UART compatibility fixes (--uart-fix enabled)..."
     if command -v raspi-config >/dev/null 2>&1; then
       raspi-config nonint do_serial_cons 1 || true
@@ -378,7 +389,11 @@ uart_preflight() {
 
     if [[ -n "$boot_cfg" ]]; then
       ensure_boot_key_value "$boot_cfg" "enable_uart" "1"
-      ensure_disable_bt_overlay "$boot_cfg"
+      if [[ "$dedicate_serial0" == "yes" ]]; then
+        ensure_disable_bt_overlay "$boot_cfg"
+      else
+        echo "Leaving Bluetooth UART overlay unchanged in ${boot_cfg}."
+      fi
     fi
     if [[ -n "$cmdline_cfg" ]]; then
       remove_serial_console_tokens "$cmdline_cfg"
@@ -386,7 +401,9 @@ uart_preflight() {
     disable_service_if_enabled "serial-getty@serial0.service"
     disable_service_if_enabled "serial-getty@ttyAMA0.service"
     disable_service_if_enabled "serial-getty@ttyS0.service"
-    disable_service_if_enabled "hciuart.service"
+    if [[ "$dedicate_serial0" == "yes" ]]; then
+      disable_service_if_enabled "hciuart.service"
+    fi
 
     serial_target="$(readlink -f "$SERIAL" 2>/dev/null || true)"
     if [[ -z "$serial_target" ]]; then
@@ -396,6 +413,12 @@ uart_preflight() {
 
   if [[ "$serial_target" =~ ^/dev/ttyS[0-9]+$ ]]; then
     echo "Warning: ${SERIAL} currently resolves to mini UART (${serial_target})."
+    if [[ "$UART_FIX" == "true" && "$dedicate_serial0" == "yes" ]]; then
+      echo "Note: this can persist until reboot after applying GPIO14/15 serial0 routing changes."
+    fi
+    if [[ "$UART_FIX" == "true" && "$dedicate_serial0" == "no" ]]; then
+      echo "Note: Bluetooth UART was kept enabled by choice; serial0 may continue using mini UART."
+    fi
     if [[ "$parity_upper" != "N" ]]; then
       echo "ERROR: parity '${PARITY}' requested but mini UART does not support parity. Use PL011 (ttyAMA) or parity N." >&2
       exit 1
