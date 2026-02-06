@@ -261,10 +261,14 @@ class PylibmodbusAdapter:
     def _server_ctor_variants(self, serial: str, baud: int, parity: str, data_bits: int, stop_bits: int):
         kwargs_common = {"parity": parity, "data_bits": data_bits, "stop_bits": stop_bits}
         kwargs_common_alt = {"parity": parity, "data_bit": data_bits, "stop_bit": stop_bits}
+        serial_bytes = serial.encode("utf-8")
         return [
             ("positional", (serial, baud, parity, data_bits, stop_bits), {}),
+            ("positional-bytes", (serial_bytes, baud, parity, data_bits, stop_bits), {}),
             ("positional-legacy", (serial, baud, parity, data_bits, stop_bits, 0), {}),
+            ("positional-legacy-bytes", (serial_bytes, baud, parity, data_bits, stop_bits, 0), {}),
             ("positional-minimal", (serial, baud, parity), {}),
+            ("positional-minimal-bytes", (serial_bytes, baud, parity), {}),
             (
                 "serial+baudrate",
                 (),
@@ -293,6 +297,15 @@ class PylibmodbusAdapter:
                 },
             ),
             (
+                "serial-bytes+baud-legacy-bits",
+                (),
+                {
+                    "serial": serial_bytes,
+                    "baud": baud,
+                    **kwargs_common_alt,
+                },
+            ),
+            (
                 "port+baudrate",
                 (),
                 {
@@ -306,6 +319,15 @@ class PylibmodbusAdapter:
                 (),
                 {
                     "port": serial,
+                    "baud": baud,
+                    **kwargs_common,
+                },
+            ),
+            (
+                "port-bytes+baud",
+                (),
+                {
+                    "port": serial_bytes,
                     "baud": baud,
                     **kwargs_common,
                 },
@@ -333,6 +355,15 @@ class PylibmodbusAdapter:
                 (),
                 {
                     "device": serial,
+                    "baud": baud,
+                    **kwargs_common_alt,
+                },
+            ),
+            (
+                "device-bytes+baud-legacy-bits",
+                (),
+                {
+                    "device": serial_bytes,
                     "baud": baud,
                     **kwargs_common_alt,
                 },

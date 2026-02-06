@@ -501,7 +501,34 @@ gpio_chip: ${GPIO_CHIP}
 pin_poll_ms: ${PIN_POLL_MS}
 stats_interval: ${STATS_INTERVAL}
 log_level: ${LOG_LEVEL}
+failure_log: ${TARGET_DIR}/runtime_failures.log
+crash_dump_dir: ${TARGET_DIR}/crash_dumps
 EOF
+}
+
+grant_dir_traverse() {
+  local d="$1"
+  [[ -d "$d" ]] || return
+  if command -v setfacl >/dev/null 2>&1; then
+    setfacl -m u:ogm_pi:rx "$d" >/dev/null 2>&1 || chmod o+rx "$d"
+  else
+    chmod o+rx "$d"
+  fi
+}
+
+ensure_service_path_access() {
+  local p
+  for p in "$TARGET_DIR" "$CONFIG_DIR"; do
+    case "$p" in
+      /home/*) ;;
+      *) continue ;;
+    esac
+    while [[ "$p" != "/" ]]; do
+      grant_dir_traverse "$p"
+      p="$(dirname "$p")"
+    done
+    grant_dir_traverse "/home"
+  done
 }
 
 validate_devices() {
@@ -693,6 +720,7 @@ if [[ "$SKIP_PIP" != "true" ]]; then
 fi
 
 mkdir -p "$CONFIG_DIR"
+chown root:ogm "$CONFIG_DIR"
 chmod 0750 "$CONFIG_DIR"
 
 if [[ "$WRITE_CONFIG" == "true" || ! -f "$CONFIG_FILE" || "$CONFIG_OVERRIDES" == "true" ]]; then
@@ -705,6 +733,8 @@ if [[ "$WRITE_PINMAP" == "true" || "$PINMAP_REQUESTED" == "true" ]]; then
 fi
 
 chown -R ogm_pi:ogm "$TARGET_DIR"
+mkdir -p "${TARGET_DIR}/crash_dumps"
+chown ogm_pi:ogm "${TARGET_DIR}/crash_dumps"
 if [[ -d "$CUSTOM_TYPES_DIR" ]]; then
   chown -R ogm_pi:ogm "$CUSTOM_TYPES_DIR"
 fi
@@ -720,6 +750,7 @@ fi
 if [[ "$SKIP_SYSTEMD" != "true" ]]; then
   install_units
   setup_systemd_override
+  ensure_service_path_access
 fi
 
 validate_devices

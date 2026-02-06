@@ -24,6 +24,7 @@ ProtectControlGroups=yes
 ProtectKernelLogs=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
+ReadWritePaths=/opt/OGM_slave_pi
 SupplementaryGroups=gpio dialout
 
 [Install]

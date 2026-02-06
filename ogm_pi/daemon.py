@@ -473,6 +473,13 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception:
+    except Exception as exc:
+        # Best-effort fallback for very-early failures (before config/log paths are loaded).
+        fallback_dir = (
+            os.environ.get("OGM_PI_CRASH_DUMP_DIR")
+            or str((Path.cwd() / "crash_dumps").resolve())
+            or "/tmp/ogm_pi_crash_dumps"
+        )
+        write_crash_dump(fallback_dir, reason="daemon_fatal_uncaught", exc=exc)
         LOGGER.exception("Fatal daemon error")
         raise
