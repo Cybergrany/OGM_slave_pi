@@ -1,14 +1,15 @@
 """Modbus RTU backend for OGM_slave_pi.
 
-Uses pylibmodbus (libmodbus binding) to serve RTU registers. The backend keeps
-RegisterStore as the canonical state and emits change events for master-writable
-registers (coils + holding_regs) when a Modbus write changes values.
+Tries a native libmodbus-backed adapter first (pylibmodbus). If the installed
+binding does not expose a usable RTU server API, falls back to a pure-Python
+pymodbus serial server implementation.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
@@ -549,6 +550,178 @@ class PylibmodbusAdapter:
         raise RuntimeError("pylibmodbus adapter requires get_values() support")
 
 
+class PymodbusAdapter:
+    """Adapter over pymodbus serial server API."""
+
+    _FC_CANDIDATES = {
+        "coils": (1, "co", "c"),
+        "discretes": (2, "di", "d"),
+        "holding_regs": (3, "hr", "h"),
+        "input_regs": (4, "ir", "i"),
+    }
+
+    def __init__(
+        self,
+        serial: str,
+        baud: int,
+        parity: str,
+        data_bits: int,
+        stop_bits: int,
+        slave_address: int,
+        totals: Dict[str, int],
+    ) -> None:
+        try:
+            from pymodbus import FramerType
+            from pymodbus.datastore import ModbusDeviceContext, ModbusSequentialDataBlock, ModbusServerContext
+            from pymodbus.server import ServerStop, StartSerialServer
+        except ImportError as exc:
+            raise RuntimeError("pymodbus is required for the fallback RTU server backend") from exc
+
+        self._framer_type = FramerType
+        self._modbus_device_context_cls = ModbusDeviceContext
+        self._modbus_sequential_block_cls = ModbusSequentialDataBlock
+        self._modbus_server_context_cls = ModbusServerContext
+        self._start_serial_server = StartSerialServer
+        self._server_stop = ServerStop
+
+        self._serial = serial
+        self._baud = int(baud)
+        self._parity = str(parity or "N")
+        self._data_bits = int(data_bits)
+        self._stop_bits = int(stop_bits)
+        self._slave_address = int(slave_address)
+        self._block_sizes = {
+            "coils": int(totals.get("coils", 0)),
+            "discretes": int(totals.get("discretes", 0)),
+            "input_regs": int(totals.get("input_regs", 0)),
+            "holding_regs": int(totals.get("holding_regs", 0)),
+        }
+        self._server_error: Optional[BaseException] = None
+        self._server_thread: Optional[threading.Thread] = None
+
+        self._device = self._build_device_context()
+        self._context = self._build_server_context()
+        self._start_server_thread()
+
+    def _build_device_context(self):
+        def block(size: int):
+            # pymodbus data blocks need at least one element.
+            return self._modbus_sequential_block_cls(0, [0] * max(1, size))
+
+        return self._modbus_device_context_cls(
+            co=block(self._block_sizes["coils"]),
+            di=block(self._block_sizes["discretes"]),
+            hr=block(self._block_sizes["holding_regs"]),
+            ir=block(self._block_sizes["input_regs"]),
+        )
+
+    def _build_server_context(self):
+        attempts = [
+            {"devices": {self._slave_address: self._device}, "single": False},
+            {"slaves": {self._slave_address: self._device}, "single": False},
+            {"devices": self._device, "single": True},
+            {"slaves": self._device, "single": True},
+        ]
+        last_exc: Optional[Exception] = None
+        for kwargs in attempts:
+            try:
+                return self._modbus_server_context_cls(**kwargs)
+            except TypeError as exc:
+                last_exc = exc
+                continue
+        raise RuntimeError("Unable to construct pymodbus server context") from last_exc
+
+    def _server_main(self) -> None:
+        try:
+            self._start_serial_server(
+                context=self._context,
+                framer=self._framer_type.RTU,
+                port=self._serial,
+                baudrate=self._baud,
+                bytesize=self._data_bits,
+                parity=self._parity,
+                stopbits=self._stop_bits,
+                timeout=0.05,
+                ignore_missing_devices=False,
+            )
+        except BaseException as exc:  # pragma: no cover - runtime dependent
+            self._server_error = exc
+            LOGGER.exception("pymodbus serial server thread failed")
+
+    def _start_server_thread(self) -> None:
+        self._server_thread = threading.Thread(target=self._server_main, name="ogm_modbus_pymodbus", daemon=True)
+        self._server_thread.start()
+        # Allow immediate startup errors to surface early.
+        time.sleep(0.25)
+        if self._server_error is not None:
+            raise RuntimeError("pymodbus serial server failed to start") from self._server_error
+        if self._server_thread is None or not self._server_thread.is_alive():
+            raise RuntimeError("pymodbus serial server exited during startup")
+
+    def _coerce_write_values(self, name: str, values: list[int]) -> list[int] | list[bool]:
+        if name in {"coils", "discretes"}:
+            return [bool(v) for v in values]
+        return [int(v) & 0xFFFF for v in values]
+
+    def _coerce_read_values(self, values: Iterable[Any]) -> list[int]:
+        return [int(bool(v)) if isinstance(v, bool) else int(v) for v in values]
+
+    def _set_values(self, name: str, values: list[int]) -> None:
+        payload = self._coerce_write_values(name, values)
+        last_exc: Optional[Exception] = None
+        for fc in self._FC_CANDIDATES[name]:
+            try:
+                self._device.setValues(fc, 0, payload)
+                return
+            except Exception as exc:
+                last_exc = exc
+        raise RuntimeError(f"pymodbus setValues failed for {name}") from last_exc
+
+    def _get_values(self, name: str, count: int) -> list[int]:
+        last_exc: Optional[Exception] = None
+        for fc in self._FC_CANDIDATES[name]:
+            try:
+                raw = self._device.getValues(fc, 0, count)
+                return self._coerce_read_values(raw)
+            except Exception as exc:
+                last_exc = exc
+        raise RuntimeError(f"pymodbus getValues failed for {name}") from last_exc
+
+    def handle_once(self) -> None:
+        if self._server_error is not None:
+            raise RuntimeError("pymodbus serial server stopped unexpectedly") from self._server_error
+        time.sleep(0.01)
+
+    def write_tables(self, tables: Dict[str, list[int]], names: Iterable[str] | None = None) -> None:
+        target_names = list(names) if names is not None else list(self._block_sizes.keys())
+        for name in target_names:
+            count = self._block_sizes.get(name, 0)
+            if count <= 0:
+                continue
+            values = tables.get(name)
+            if values is None:
+                continue
+            self._set_values(name, list(values[:count]))
+
+    def read_tables(self, names: Iterable[str] | None = None) -> Dict[str, list[int]]:
+        target_names = list(names) if names is not None else list(self._block_sizes.keys())
+        tables: Dict[str, list[int]] = {}
+        for name in target_names:
+            count = self._block_sizes.get(name, 0)
+            if count <= 0:
+                continue
+            tables[name] = self._get_values(name, count)
+        return tables
+
+    def close(self) -> None:
+        try:
+            self._server_stop()
+        except Exception:
+            pass
+        if self._server_thread is not None:
+            self._server_thread.join(timeout=2.0)
+
+
 class LibModbusBackend(ModbusBackend):
     """pylibmodbus RTU backend with a change-detecting sync loop."""
 
@@ -573,7 +746,7 @@ class LibModbusBackend(ModbusBackend):
         self._parity = parity
         self._data_bits = data_bits
         self._stop_bits = stop_bits
-        self._adapter: Optional[PylibmodbusAdapter] = None
+        self._adapter: Optional[Any] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._tracker = ChangeTracker(pinmap)
@@ -587,15 +760,40 @@ class LibModbusBackend(ModbusBackend):
             "input_regs": len(self._store.input_regs),
             "holding_regs": len(self._store.holding_regs),
         }
-        self._adapter = PylibmodbusAdapter(
-            self._serial,
-            self._baud,
-            self._parity,
-            self._data_bits,
-            self._stop_bits,
-            self._slave_address,
-            totals,
-        )
+        pylib_error: Optional[Exception] = None
+        try:
+            self._adapter = PylibmodbusAdapter(
+                self._serial,
+                self._baud,
+                self._parity,
+                self._data_bits,
+                self._stop_bits,
+                self._slave_address,
+                totals,
+            )
+            LOGGER.info("Using Modbus adapter: pylibmodbus")
+        except Exception as exc:
+            pylib_error = exc
+            LOGGER.warning("pylibmodbus backend unavailable (%s); trying pymodbus fallback", exc)
+
+        if self._adapter is None:
+            try:
+                self._adapter = PymodbusAdapter(
+                    self._serial,
+                    self._baud,
+                    self._parity,
+                    self._data_bits,
+                    self._stop_bits,
+                    self._slave_address,
+                    totals,
+                )
+                LOGGER.info("Using Modbus adapter: pymodbus")
+            except Exception as pymodbus_exc:
+                raise RuntimeError(
+                    "Unable to initialize Modbus RTU backend with pylibmodbus or pymodbus. "
+                    f"pylibmodbus error: {pylib_error}; pymodbus error: {pymodbus_exc}"
+                ) from pymodbus_exc
+
         self._thread = threading.Thread(target=self._serve_loop, name="ogm_modbus", daemon=True)
         self._thread.start()
         LOGGER.info("Modbus RTU backend started on %s (addr=%s)", self._serial, self._slave_address)

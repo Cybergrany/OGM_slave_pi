@@ -468,7 +468,11 @@ def main() -> int:
     try:
         while not fatal_event.is_set():
             if not ipc_thread.is_alive():
-                break
+                LOGGER.error("IPC server thread exited unexpectedly; restarting it.")
+                ipc_thread = threading.Thread(target=server.serve_forever, name="ogm_ipc", daemon=True)
+                ipc_thread.start()
+                time.sleep(0.25)
+                continue
             time.sleep(0.25)
     except Exception as exc:
         write_crash_dump(
