@@ -190,31 +190,186 @@ class PylibmodbusAdapter:
         }
         self._register_blocks()
 
-    def _create_server(self, serial: str, baud: int, parity: str, data_bits: int, stop_bits: int):
-        server_cls = None
-        for name in ("ModbusRtuServer", "ModbusRTUServer", "ModbusServer"):
-            if hasattr(self._mod, name):
-                server_cls = getattr(self._mod, name)
-                break
-        if server_cls is None:
-            raise RuntimeError("pylibmodbus RTU server class not found (expected ModbusRtuServer)")
+    def _module_candidates(self) -> list[tuple[str, Any]]:
+        modules: list[tuple[str, Any]] = [("pylibmodbus", self._mod)]
+        for attr in ("server", "rtu", "modbus", "backend"):
+            child = getattr(self._mod, attr, None)
+            if child is None:
+                continue
+            modules.append((f"pylibmodbus.{attr}", child))
+        return modules
 
-        try:
-            server = server_cls(serial, baud, parity, data_bits, stop_bits)
-        except TypeError:
-            server = server_cls(
-                serial,
-                baudrate=baud,
-                parity=parity,
-                data_bits=data_bits,
-                stop_bits=stop_bits,
+    def _discover_server_classes(self) -> list[tuple[str, type]]:
+        preferred_names = (
+            "ModbusRtuServer",
+            "ModbusRTUServer",
+            "ModbusServerRtu",
+            "ModbusServerRTU",
+            "RtuServer",
+            "RTUServer",
+            "ModbusServer",
+        )
+        discovered: list[tuple[str, type]] = []
+        seen_ids: set[int] = set()
+
+        def add_candidate(label: str, candidate: Any) -> None:
+            if not isinstance(candidate, type):
+                return
+            ident = id(candidate)
+            if ident in seen_ids:
+                return
+            seen_ids.add(ident)
+            discovered.append((label, candidate))
+
+        for module_name, module in self._module_candidates():
+            for cls_name in preferred_names:
+                if hasattr(module, cls_name):
+                    add_candidate(f"{module_name}.{cls_name}", getattr(module, cls_name))
+
+        for module_name, module in self._module_candidates():
+            for cls_name in dir(module):
+                if cls_name.startswith("_"):
+                    continue
+                try:
+                    candidate = getattr(module, cls_name)
+                except Exception:
+                    continue
+                lower = cls_name.lower()
+                if "server" not in lower and "rtu" not in lower:
+                    continue
+                if "modbus" not in lower and "rtu" not in lower:
+                    continue
+                add_candidate(f"{module_name}.{cls_name}", candidate)
+
+        return discovered
+
+    def _available_symbols(self, limit: int = 40) -> list[str]:
+        names: set[str] = set()
+        for module_name, module in self._module_candidates():
+            for symbol in dir(module):
+                if symbol.startswith("_"):
+                    continue
+                lower = symbol.lower()
+                if "modbus" not in lower and "rtu" not in lower and "server" not in lower:
+                    continue
+                names.add(f"{module_name}.{symbol}")
+        ordered = sorted(names)
+        if len(ordered) <= limit:
+            return ordered
+        return ordered[:limit] + [f"... (+{len(ordered) - limit} more)"]
+
+    def _server_ctor_variants(self, serial: str, baud: int, parity: str, data_bits: int, stop_bits: int):
+        kwargs_common = {"parity": parity, "data_bits": data_bits, "stop_bits": stop_bits}
+        return [
+            ("positional", (serial, baud, parity, data_bits, stop_bits), {}),
+            (
+                "serial+baudrate",
+                (),
+                {
+                    "serial": serial,
+                    "baudrate": baud,
+                    **kwargs_common,
+                },
+            ),
+            (
+                "serial+baud",
+                (),
+                {
+                    "serial": serial,
+                    "baud": baud,
+                    **kwargs_common,
+                },
+            ),
+            (
+                "port+baudrate",
+                (),
+                {
+                    "port": serial,
+                    "baudrate": baud,
+                    **kwargs_common,
+                },
+            ),
+            (
+                "port+baud",
+                (),
+                {
+                    "port": serial,
+                    "baud": baud,
+                    **kwargs_common,
+                },
+            ),
+            (
+                "device+baudrate",
+                (),
+                {
+                    "device": serial,
+                    "baudrate": baud,
+                    **kwargs_common,
+                },
+            ),
+            (
+                "device+baud",
+                (),
+                {
+                    "device": serial,
+                    "baud": baud,
+                    **kwargs_common,
+                },
+            ),
+        ]
+
+    @staticmethod
+    def _looks_like_server(server: Any) -> bool:
+        has_request_loop = any(hasattr(server, meth) for meth in ("handle_request", "receive", "serve_once"))
+        has_mapping_api = any(
+            hasattr(server, meth)
+            for meth in ("add_slave", "get_slave", "set_slave", "add_block", "set_values", "get_values")
+        )
+        return has_request_loop and has_mapping_api
+
+    def _create_server(self, serial: str, baud: int, parity: str, data_bits: int, stop_bits: int):
+        candidates = self._discover_server_classes()
+        available_symbols = ", ".join(self._available_symbols())
+        if not candidates:
+            raise RuntimeError(
+                "pylibmodbus RTU server class not found. "
+                f"Available modbus-like symbols: {available_symbols or '<none>'}"
             )
 
-        if hasattr(server, "start"):
-            server.start()
-        elif hasattr(server, "listen"):
-            server.listen()
-        return server
+        errors: list[str] = []
+        for label, server_cls in candidates:
+            server = None
+            ctor_errors: list[str] = []
+            for variant_name, args, kwargs in self._server_ctor_variants(serial, baud, parity, data_bits, stop_bits):
+                try:
+                    server = server_cls(*args, **kwargs)
+                    break
+                except TypeError as exc:
+                    ctor_errors.append(f"{variant_name}: {exc}")
+                except Exception as exc:  # pragma: no cover - runtime dependent
+                    ctor_errors.append(f"{variant_name}: {type(exc).__name__}: {exc}")
+                    break
+            if server is None:
+                joined = "; ".join(ctor_errors[-3:]) if ctor_errors else "no constructor variants matched"
+                errors.append(f"{label} -> {joined}")
+                continue
+            if not self._looks_like_server(server):
+                errors.append(f"{label} -> object does not look like RTU server ({type(server).__name__})")
+                continue
+
+            LOGGER.info("Using pylibmodbus server class: %s", label)
+            if hasattr(server, "start"):
+                server.start()
+            elif hasattr(server, "listen"):
+                server.listen()
+            return server
+
+        details = "; ".join(errors[-6:]) if errors else "no candidates succeeded"
+        raise RuntimeError(
+            "pylibmodbus RTU server initialization failed. "
+            f"Tried {len(candidates)} class candidate(s). Last errors: {details}. "
+            f"Available modbus-like symbols: {available_symbols or '<none>'}"
+        )
 
     def _init_slave(self, slave_address: int):
         slave = None

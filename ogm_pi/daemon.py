@@ -44,6 +44,7 @@ DEFAULT_SETTINGS = {
     "stats_interval": 5.0,
     "log_level": "INFO",
     "failure_log": None,
+    "modbus_fail_open": True,
 }
 
 
@@ -67,6 +68,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stats-interval", type=float, help="Board stats update interval (s)")
     parser.add_argument("--log-level", help="Logging level (DEBUG, INFO, WARNING)")
     parser.add_argument("--failure-log", help="Path to append daemon failure/runtime logs")
+    parser.add_argument(
+        "--modbus-fail-open",
+        dest="modbus_fail_open",
+        action="store_true",
+        help="Keep daemon running (IPC + safe outputs) if Modbus backend fails",
+    )
+    parser.add_argument(
+        "--no-modbus-fail-open",
+        dest="modbus_fail_open",
+        action="store_false",
+        help="Exit daemon if Modbus backend fails",
+    )
     return parser.parse_args()
 
 
@@ -99,6 +112,21 @@ def build_settings(config: dict, cli: argparse.Namespace) -> dict:
             continue
         settings[key] = value
     return settings
+
+
+def as_bool(value: object, *, default: bool) -> bool:
+    """Parse bool-like values from config/CLI overlays."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(value)
 
 
 def resolve_failure_log_path(settings: dict) -> str | None:
@@ -204,14 +232,25 @@ def main() -> int:
     slave_address = settings.get("slave_address")
     if slave_address is None:
         slave_address = pinmap.address
+    modbus_fail_open = as_bool(settings.get("modbus_fail_open", True), default=True)
 
     fatal_event = threading.Event()
+    backend_failed = threading.Event()
 
-    def on_modbus_error(_exc: Exception) -> None:
+    def on_modbus_error(exc: Exception) -> None:
+        if backend_failed.is_set():
+            return
+        backend_failed.set()
+        runtime.force_safe_outputs("modbus_error")
+        if modbus_fail_open:
+            LOGGER.error(
+                "Modbus backend encountered a fatal error; continuing in fail-open IPC-only mode: %s",
+                exc,
+            )
+            return
         if fatal_event.is_set():
             return
         fatal_event.set()
-        runtime.force_safe_outputs("modbus_error")
         os.kill(os.getpid(), signal.SIGTERM)
 
     backend = create_backend(
@@ -258,7 +297,10 @@ def main() -> int:
         except Exception as exc:
             LOGGER.exception("Modbus backend failed to start")
             backend_start_error.append(exc)
-            fatal_event.set()
+            backend_failed.set()
+            runtime.force_safe_outputs("modbus_start_failed")
+            if not modbus_fail_open:
+                fatal_event.set()
         finally:
             backend_start_done.set()
 
@@ -267,7 +309,13 @@ def main() -> int:
     if not backend_start_done.wait(timeout=5.0):
         LOGGER.warning("Modbus backend startup is taking longer than expected; IPC remains available.")
     elif backend_start_error:
-        raise backend_start_error[0]
+        if modbus_fail_open:
+            LOGGER.error(
+                "Modbus backend startup failed; running in fail-open IPC-only mode. "
+                "Fix Modbus backend dependencies/config and restart service."
+            )
+        else:
+            raise backend_start_error[0]
 
     try:
         while not fatal_event.is_set():
