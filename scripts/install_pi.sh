@@ -66,6 +66,8 @@ TARGET_DIR="/opt/OGM_slave_pi"
 CONFIG_DIR="/etc/ogm_pi"
 CONFIG_FILE="${CONFIG_DIR}/ogm_pi.yaml"
 PINMAP_FILE="${CONFIG_DIR}/pinmap.json"
+RUNTIME_DEBUG_DIR="${TARGET_DIR}/config"
+RUNTIME_DEBUG_FILE="${RUNTIME_DEBUG_DIR}/debug.yaml"
 MODE="install"
 
 BOARD_NAME=""
@@ -184,6 +186,8 @@ fi
 
 CONFIG_FILE="${CONFIG_DIR}/ogm_pi.yaml"
 PINMAP_FILE="${CONFIG_DIR}/pinmap.json"
+RUNTIME_DEBUG_DIR="${TARGET_DIR}/config"
+RUNTIME_DEBUG_FILE="${RUNTIME_DEBUG_DIR}/debug.yaml"
 if [[ "$CUSTOM_TYPES_OVERRIDE" != "true" ]]; then
   CUSTOM_TYPES_DIR="${TARGET_DIR}/custom_types"
 fi
@@ -506,6 +510,17 @@ crash_dump_dir: ${TARGET_DIR}/crash_dumps
 EOF
 }
 
+ensure_runtime_debug_config() {
+  mkdir -p "$RUNTIME_DEBUG_DIR"
+  if [[ ! -f "$RUNTIME_DEBUG_FILE" ]]; then
+    cat > "$RUNTIME_DEBUG_FILE" <<'EOF'
+# Runtime debug overrides loaded by ogm_pi from <working-dir>/config/debug.yaml
+DEBUG:
+  modbus_log_every_failure: false
+EOF
+  fi
+}
+
 grant_dir_traverse() {
   local d="$1"
   [[ -d "$d" ]] || return
@@ -755,6 +770,7 @@ if [[ "$WRITE_CONFIG" == "true" || ! -f "$CONFIG_FILE" || "$CONFIG_OVERRIDES" ==
   backup_file "$CONFIG_FILE"
   write_config
 fi
+ensure_runtime_debug_config
 
 if [[ "$WRITE_PINMAP" == "true" || "$PINMAP_REQUESTED" == "true" ]]; then
   generate_pinmap
@@ -769,6 +785,14 @@ chown ogm_pi:ogm "${TARGET_DIR}/runtime_failures.log"
 chmod 0644 "${TARGET_DIR}/runtime_failures.log"
 if [[ -d "$CUSTOM_TYPES_DIR" ]]; then
   chown -R ogm_pi:ogm "$CUSTOM_TYPES_DIR"
+fi
+if [[ -d "$RUNTIME_DEBUG_DIR" ]]; then
+  chown ogm_pi:ogm "$RUNTIME_DEBUG_DIR"
+  chmod 0750 "$RUNTIME_DEBUG_DIR"
+fi
+if [[ -f "$RUNTIME_DEBUG_FILE" ]]; then
+  chown ogm_pi:ogm "$RUNTIME_DEBUG_FILE"
+  chmod 0640 "$RUNTIME_DEBUG_FILE"
 fi
 if [[ -f "$CONFIG_FILE" ]]; then
   chown ogm_pi:ogm "$CONFIG_FILE"
@@ -790,6 +814,7 @@ systemd_reload_restart
 
 echo "Installed OGM_slave_pi to ${TARGET_DIR}"
 echo "Config: ${CONFIG_FILE}"
+echo "Runtime debug config: ${RUNTIME_DEBUG_FILE}"
 echo "Pinmap: ${PINMAP_FILE}"
 if [[ "$UART_REBOOT_REQUIRED" == "true" ]]; then
   echo "UART updates were applied. Reboot before using Modbus on ${SERIAL}."
