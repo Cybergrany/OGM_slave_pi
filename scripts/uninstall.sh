@@ -47,6 +47,8 @@ detect_default_user() {
 DEFAULT_USER="$(detect_default_user)"
 ROOT_DIR="/home/${DEFAULT_USER}/Desktop/OGM_slave_pi"
 SOCKET_PATH="/run/ogm_pi.sock"
+SHUTDOWN_HELPER_PATH="/usr/local/sbin/ogm_pi_shutdown"
+SUDOERS_SHUTDOWN_FILE="/etc/sudoers.d/ogm_pi_shutdown"
 DELETE_LOGS="false"
 DRY_RUN="false"
 
@@ -147,6 +149,8 @@ if command -v systemctl >/dev/null 2>&1; then
 else
   echo "Warning: systemctl not found, skipping systemd cleanup." >&2
 fi
+
+run_cmd rm -f "$SUDOERS_SHUTDOWN_FILE" "$SHUTDOWN_HELPER_PATH"
 
 run_cmd rm -rf "$RUNTIME_DIR" "$CONFIG_DIR" "$INCOMING_DIR" "$STAGING_DIR"
 run_cmd rm -f "$SOCKET_PATH"

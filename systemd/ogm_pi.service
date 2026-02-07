@@ -16,7 +16,8 @@ ExecStart=/opt/OGM_slave_pi/.venv/bin/python -m ogm_pi.daemon --config /etc/ogm_
 Restart=always
 RestartSec=2
 TimeoutStopSec=5
-NoNewPrivileges=yes
+# BOARD_SHUTDOWN uses a tightly-scoped sudoers helper for poweroff.
+NoNewPrivileges=no
 PrivateTmp=yes
 ProtectSystem=full
 ProtectHome=read-only

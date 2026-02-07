@@ -15,6 +15,8 @@ from .pinmap import PinMap, PinRecord, RegSpan
 from .store import RegisterStore, crc16_modbus_words
 
 LOGGER = logging.getLogger(__name__)
+SHUTDOWN_HELPER = "/usr/local/sbin/ogm_pi_shutdown"
+SHUTDOWN_CMD = ["sudo", "-n", SHUTDOWN_HELPER]
 
 
 def _parse_int_arg(args: List[Any], default: int = 0) -> int:
@@ -454,10 +456,13 @@ class BoardShutdown(PinHandler):
             LOGGER.warning("BoardShutdown already in flight; ignoring duplicate trigger")
             return
         self._command_in_flight = True
-        LOGGER.warning("Board shutdown triggered via BOARD_SHUTDOWN; executing 'sudo shutdown now'")
+        LOGGER.warning(
+            "Board shutdown triggered via BOARD_SHUTDOWN; executing '%s'",
+            " ".join(SHUTDOWN_CMD),
+        )
         try:
             subprocess.Popen(
-                ["sudo", "shutdown", "now"],
+                SHUTDOWN_CMD,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
