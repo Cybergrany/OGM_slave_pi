@@ -53,6 +53,10 @@ DEFAULT_SETTINGS = {
 }
 
 
+class ConfigLoadError(ValueError):
+    """Raised when daemon config exists but cannot be read/parsed/validated."""
+
+
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments for the daemon."""
     parser = argparse.ArgumentParser(description="OGM_slave_pi Modbus RTU + IPC daemon", argument_default=argparse.SUPPRESS)
@@ -98,12 +102,13 @@ def load_config(path: str) -> dict:
         with config_path.open("r", encoding="utf-8") as handle:
             data = yaml.safe_load(handle)
     except OSError as exc:
-        print(f"ogm_pi: failed to read config {path}: {exc}", file=sys.stderr)
-        return {}
+        raise ConfigLoadError(f"failed to read config {path}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise ConfigLoadError(f"failed to parse config {path}: {exc}") from exc
     if data is None:
         return {}
     if not isinstance(data, dict):
-        raise ValueError(f"Config {path} must be a mapping")
+        raise ConfigLoadError(f"config {path} must be a mapping")
     return data
 
 
@@ -357,7 +362,23 @@ def configure_logging(level: str, *, failure_log: str | None = None) -> None:
 def main() -> int:
     """CLI entry point for running the daemon."""
     args = parse_args()
-    config = load_config(getattr(args, "config", DEFAULT_CONFIG_PATH))
+    config_path = getattr(args, "config", DEFAULT_CONFIG_PATH)
+    try:
+        config = load_config(config_path)
+    except ConfigLoadError as exc:
+        fallback_dump_dir = (
+            os.environ.get("OGM_PI_CRASH_DUMP_DIR")
+            or str((Path.cwd().parent / "crash_dumps").resolve())
+            or str((Path.cwd() / "crash_dumps").resolve())
+            or "/tmp/ogm_pi_crash_dumps"
+        )
+        write_crash_dump(
+            fallback_dump_dir,
+            reason="config_load_error",
+            exc=exc,
+            details={"config_path": config_path},
+        )
+        raise SystemExit(f"ogm_pi: {exc}")
     settings = build_settings(config, args)
     modbus_log_every_failure, modbus_debug_source = resolve_modbus_debug_flag(settings)
     settings["modbus_log_every_failure"] = modbus_log_every_failure

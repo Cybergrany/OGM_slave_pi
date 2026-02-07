@@ -113,6 +113,7 @@ DATA_BITS_SET="false"
 STOP_BITS_SET="false"
 UART_REBOOT_REQUIRED="false"
 UART_FIX_APPLIED="false"
+CONFIG_ACCESS_USER=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -190,6 +191,17 @@ RUNTIME_DEBUG_DIR="${TARGET_DIR}/config"
 RUNTIME_DEBUG_FILE="${RUNTIME_DEBUG_DIR}/debug.yaml"
 if [[ "$CUSTOM_TYPES_OVERRIDE" != "true" ]]; then
   CUSTOM_TYPES_DIR="${TARGET_DIR}/custom_types"
+fi
+if [[ -n "${OGM_CONFIG_USER:-}" ]]; then
+  CONFIG_ACCESS_USER="${OGM_CONFIG_USER}"
+elif [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+  CONFIG_ACCESS_USER="${SUDO_USER}"
+fi
+if [[ -n "$CONFIG_ACCESS_USER" ]]; then
+  if ! id -u "$CONFIG_ACCESS_USER" >/dev/null 2>&1; then
+    echo "Warning: requested config access user '$CONFIG_ACCESS_USER' does not exist; skipping user ACL grants." >&2
+    CONFIG_ACCESS_USER=""
+  fi
 fi
 
 is_soc_uart_path() {
@@ -521,6 +533,32 @@ EOF
   fi
 }
 
+grant_user_path_access() {
+  local user="$1"
+  local path="$2"
+  local perms="$3"
+  [[ -n "$user" ]] || return
+  [[ -e "$path" ]] || return
+  if command -v setfacl >/dev/null 2>&1; then
+    setfacl -m "u:${user}:${perms}" "$path" >/dev/null 2>&1 || true
+  else
+    case "$path" in
+      /home/*) chown "$user:ogm" "$path" >/dev/null 2>&1 || true ;;
+      *) ;;
+    esac
+  fi
+}
+
+grant_config_access_for_user() {
+  local user="$1"
+  [[ -n "$user" ]] || return
+  grant_user_path_access "$user" "$CONFIG_DIR" "rwx"
+  grant_user_path_access "$user" "$CONFIG_FILE" "rw"
+  grant_user_path_access "$user" "$PINMAP_FILE" "rw"
+  grant_user_path_access "$user" "$RUNTIME_DEBUG_DIR" "rwx"
+  grant_user_path_access "$user" "$RUNTIME_DEBUG_FILE" "rw"
+}
+
 grant_dir_traverse() {
   local d="$1"
   [[ -d "$d" ]] || return
@@ -764,7 +802,7 @@ fi
 
 mkdir -p "$CONFIG_DIR"
 chown root:ogm "$CONFIG_DIR"
-chmod 0750 "$CONFIG_DIR"
+chmod 0770 "$CONFIG_DIR"
 
 if [[ "$WRITE_CONFIG" == "true" || ! -f "$CONFIG_FILE" || "$CONFIG_OVERRIDES" == "true" ]]; then
   backup_file "$CONFIG_FILE"
@@ -788,20 +826,21 @@ if [[ -d "$CUSTOM_TYPES_DIR" ]]; then
 fi
 if [[ -d "$RUNTIME_DEBUG_DIR" ]]; then
   chown ogm_pi:ogm "$RUNTIME_DEBUG_DIR"
-  chmod 0750 "$RUNTIME_DEBUG_DIR"
+  chmod 0770 "$RUNTIME_DEBUG_DIR"
 fi
 if [[ -f "$RUNTIME_DEBUG_FILE" ]]; then
   chown ogm_pi:ogm "$RUNTIME_DEBUG_FILE"
-  chmod 0640 "$RUNTIME_DEBUG_FILE"
+  chmod 0660 "$RUNTIME_DEBUG_FILE"
 fi
 if [[ -f "$CONFIG_FILE" ]]; then
   chown ogm_pi:ogm "$CONFIG_FILE"
-  chmod 0640 "$CONFIG_FILE"
+  chmod 0660 "$CONFIG_FILE"
 fi
 if [[ -f "$PINMAP_FILE" ]]; then
   chown ogm_pi:ogm "$PINMAP_FILE"
-  chmod 0640 "$PINMAP_FILE"
+  chmod 0660 "$PINMAP_FILE"
 fi
+grant_config_access_for_user "$CONFIG_ACCESS_USER"
 
 if [[ "$SKIP_SYSTEMD" != "true" ]]; then
   install_units
