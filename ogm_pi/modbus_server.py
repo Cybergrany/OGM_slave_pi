@@ -16,7 +16,6 @@ import os
 import stat
 import sys
 import threading
-import time
 import termios
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set
@@ -95,14 +94,9 @@ _CUSTOM_BAUD_CONNECT_FALLBACK = 115200
 # Linux ioctl constants for termios2 (TCGETS2/TCSETS2 + BOTHER custom speeds).
 _TCGETS2 = 0x802C542A
 _TCSETS2 = 0x402C542B
-_TIOCGICOUNT = 0x545D
 _BOTHER = 0x1000
 _CBAUD = 0x100F
 _NCCS = 19
-
-_SERIAL_HEALTH_CHECK_INTERVAL_S = 10.0
-_SERIAL_INACTIVE_WARN_S = 30.0
-_SERIAL_INACTIVE_DUMP_S = 120.0
 
 
 class _Termios2(ctypes.Structure):
@@ -115,23 +109,6 @@ class _Termios2(ctypes.Structure):
         ("c_cc", ctypes.c_ubyte * _NCCS),
         ("c_ispeed", ctypes.c_uint32),
         ("c_ospeed", ctypes.c_uint32),
-    ]
-
-
-class _SerialIcounter(ctypes.Structure):
-    _fields_ = [
-        ("cts", ctypes.c_int),
-        ("dsr", ctypes.c_int),
-        ("rng", ctypes.c_int),
-        ("dcd", ctypes.c_int),
-        ("rx", ctypes.c_int),
-        ("tx", ctypes.c_int),
-        ("frame", ctypes.c_int),
-        ("overrun", ctypes.c_int),
-        ("parity", ctypes.c_int),
-        ("brk", ctypes.c_int),
-        ("buf_overrun", ctypes.c_int),
-        ("reserved", ctypes.c_int * 9),
     ]
 
 
@@ -525,25 +502,7 @@ class LibModbusAdapter:
             raise RuntimeError("modbus_get_socket returned invalid fd")
         return fd
 
-    def _read_serial_icounter(self, fd: int) -> Optional[Dict[str, int]]:
-        if not sys.platform.startswith("linux"):
-            return None
-        counters = _SerialIcounter()
-        try:
-            fcntl.ioctl(fd, _TIOCGICOUNT, counters)
-        except OSError:
-            return None
-        return {
-            "rx": int(counters.rx),
-            "tx": int(counters.tx),
-            "frame": int(counters.frame),
-            "parity": int(counters.parity),
-            "overrun": int(counters.overrun),
-            "buf_overrun": int(counters.buf_overrun),
-            "brk": int(counters.brk),
-        }
-
-    def _runtime_diagnostics(self, include_counters: bool = True) -> Dict[str, Any]:
+    def _runtime_diagnostics(self) -> Dict[str, Any]:
         if self._ctx is None:
             raise RuntimeError("libmodbus context is not initialized")
         if self._fd < 0:
@@ -587,15 +546,10 @@ class LibModbusAdapter:
             diag["actual_data_bits"] = _decode_termios_data_bits(cflag)
             diag["actual_stop_bits"] = _decode_termios_stop_bits(cflag)
             diag["termios_source"] = "tcgetattr"
-
-        if include_counters:
-            counters = self._read_serial_icounter(self._fd)
-            if counters is not None:
-                diag["icount"] = counters
         return diag
 
-    def _verify_runtime_serial_config(self, *, startup: bool) -> Dict[str, Any]:
-        diag = self._runtime_diagnostics(include_counters=True)
+    def _verify_startup_serial_config(self) -> Dict[str, Any]:
+        diag = self._runtime_diagnostics()
         issues: List[str] = []
 
         if not bool(diag.get("is_tty")):
@@ -621,9 +575,8 @@ class LibModbusAdapter:
             )
 
         if issues:
-            scope = "startup" if startup else "runtime"
             raise RuntimeError(
-                f"Serial {scope} configuration check failed: {', '.join(issues)}. "
+                f"Serial startup configuration check failed: {', '.join(issues)}. "
                 f"diagnostics={diag}"
             )
         return diag
@@ -681,7 +634,7 @@ class LibModbusAdapter:
         if self._using_custom_baud:
             self._set_custom_baud_linux(self._fd, requested_baud)
 
-        diag = self._verify_runtime_serial_config(startup=True)
+        diag = self._verify_startup_serial_config()
         LOGGER.info(
             "Serial runtime verified: %s -> %s baud=%s parity=%s bits=%s stop=%s custom=%s",
             self._serial,
@@ -773,14 +726,6 @@ class LibModbusAdapter:
         fatal = not self._is_recoverable_errno(code, operation)
         message = f"libmodbus {operation} failed (errno={code}: {self._error_message(code)})"
         raise ModbusBackendError(message, fatal=fatal, operation=operation, errno_code=code)
-
-    def verify_runtime_serial_config(self) -> Dict[str, Any]:
-        """Validate current serial settings against configured Modbus settings."""
-        return self._verify_runtime_serial_config(startup=False)
-
-    def runtime_diagnostics(self) -> Dict[str, Any]:
-        """Return current serial diagnostics including line counters when available."""
-        return self._runtime_diagnostics(include_counters=True)
 
     def apply_full_tables(self, tables: Dict[str, List[int]]) -> None:
         """Copy full register tables into libmodbus mapping memory."""
@@ -968,11 +913,6 @@ class LibModbusBackend(ModbusBackend):
         self._shadow: Dict[str, List[int]] = {"coils": [], "holding_regs": []}
         self._recoverable_error_count = 0
         self._log_every_recoverable_error = bool(log_every_recoverable_error)
-        self._health_thread: Optional[threading.Thread] = None
-        self._last_serial_activity_ts = time.monotonic()
-        self._last_health_warning_ts = 0.0
-        self._last_health_dump_ts = 0.0
-        self._last_icount: Optional[Dict[str, int]] = None
 
     def start(self) -> None:
         totals = {
@@ -999,12 +939,9 @@ class LibModbusBackend(ModbusBackend):
 
         # Flush any startup writes from the store; initial mapping now reflects state.
         self._store.consume_dirty_updates()
-        self._last_serial_activity_ts = time.monotonic()
 
         self._thread = threading.Thread(target=self._serve_loop, name="ogm_modbus", daemon=True)
         self._thread.start()
-        self._health_thread = threading.Thread(target=self._serial_health_loop, name="ogm_modbus_health", daemon=True)
-        self._health_thread.start()
         LOGGER.info("Modbus RTU backend started on %s (addr=%s)", self._serial, self._slave_address)
 
     def stop(self) -> None:
@@ -1013,8 +950,6 @@ class LibModbusBackend(ModbusBackend):
             self._adapter.interrupt()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
-        if self._health_thread is not None:
-            self._health_thread.join(timeout=2.0)
         if self._adapter is not None:
             self._adapter.close()
 
@@ -1091,66 +1026,6 @@ class LibModbusBackend(ModbusBackend):
         else:
             LOGGER.debug("Recoverable Modbus %s error: %s", exc.operation, exc)
 
-    def _log_serial_diagnostic_dump(self, reason: str, diagnostics: Dict[str, Any]) -> None:
-        LOGGER.error("Serial diagnostic dump (%s): %s", reason, diagnostics)
-
-    def _serial_health_loop(self) -> None:
-        while not self._stop_event.wait(_SERIAL_HEALTH_CHECK_INTERVAL_S):
-            if self._adapter is None:
-                continue
-            try:
-                diagnostics = self._adapter.verify_runtime_serial_config()
-                counters = diagnostics.get("icount")
-                now = time.monotonic()
-
-                if isinstance(counters, dict):
-                    if self._last_icount is None:
-                        self._last_icount = dict(counters)
-                    else:
-                        prev = self._last_icount
-                        rx_delta = int(counters.get("rx", 0)) - int(prev.get("rx", 0))
-                        tx_delta = int(counters.get("tx", 0)) - int(prev.get("tx", 0))
-                        if rx_delta > 0 or tx_delta > 0:
-                            self._last_serial_activity_ts = now
-
-                        line_error_keys = ("frame", "parity", "overrun", "buf_overrun", "brk")
-                        line_error_delta = {
-                            key: int(counters.get(key, 0)) - int(prev.get(key, 0))
-                            for key in line_error_keys
-                        }
-                        if any(delta > 0 for delta in line_error_delta.values()):
-                            LOGGER.warning(
-                                "Serial line-error counters increased on %s: %s",
-                                self._serial,
-                                line_error_delta,
-                            )
-                            if (now - self._last_health_dump_ts) >= _SERIAL_INACTIVE_WARN_S:
-                                self._log_serial_diagnostic_dump("line_errors", diagnostics)
-                                self._last_health_dump_ts = now
-
-                        self._last_icount = dict(counters)
-
-                inactive_s = now - self._last_serial_activity_ts
-                if inactive_s >= _SERIAL_INACTIVE_WARN_S and (now - self._last_health_warning_ts) >= _SERIAL_INACTIVE_WARN_S:
-                    LOGGER.warning(
-                        "No serial RX/TX activity detected for %.1fs on %s (target=%s)",
-                        inactive_s,
-                        self._serial,
-                        diagnostics.get("serial_target"),
-                    )
-                    self._last_health_warning_ts = now
-
-                if inactive_s >= _SERIAL_INACTIVE_DUMP_S and (now - self._last_health_dump_ts) >= _SERIAL_INACTIVE_DUMP_S:
-                    full_diag = self._adapter.runtime_diagnostics()
-                    self._log_serial_diagnostic_dump("inactive_port", full_diag)
-                    self._last_health_dump_ts = now
-
-            except Exception as exc:
-                if self._stop_event.is_set():
-                    break
-                self._handle_fatal_error(RuntimeError(f"Serial runtime health check failed: {exc}"))
-                break
-
     def _serve_loop(self) -> None:
         if self._adapter is None:
             return
@@ -1160,7 +1035,6 @@ class LibModbusBackend(ModbusBackend):
                 req_len, request = self._adapter.receive_request()
                 if req_len <= 0:
                     continue
-                self._last_serial_activity_ts = time.monotonic()
 
                 # Bring libmodbus mapping up to date right before replying.
                 self._sync_store_to_mapping()
