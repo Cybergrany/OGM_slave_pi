@@ -92,6 +92,11 @@ GPIO example (BCM numbering via libgpiod):
 python3 -m ogm_pi.daemon --config config/ogm_pi.yaml
 ```
 
+7) **View live logs**
+```bash
+journalctl -fu ogm_pi.service
+```
+
 ## IPC usage (Unix socket)
 
 The daemon exposes a line-delimited JSON protocol over `/run/ogm_pi.sock`.
