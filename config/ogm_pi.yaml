@@ -13,6 +13,5 @@ gpio_chip: /dev/gpiochip0
 pin_poll_ms: 20
 stats_interval: 5.0
 log_level: INFO
-# Optional fallback (main config path): set true to log every recoverable Modbus failure.
-# Runtime override (preferred): <runtime>/config/debug.yaml -> DEBUG.modbus_log_every_failure
+# Set true to log every recoverable Modbus failure.
 modbus_log_every_failure: false

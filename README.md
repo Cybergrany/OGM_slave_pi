@@ -82,14 +82,6 @@ modbus_log_every_failure: false
 ```
 For USB adapters instead of GPIO14/15 UART, use `serial: /dev/ttyUSB0` (or your adapter path).
 
-For runtime deploy layouts, you can toggle per-failure Modbus logging in
-`<target-dir>/config/debug.yaml` (for example
-`/home/<user>/Desktop/OGM_slave_pi/runtime/config/debug.yaml`):
-```yaml
-DEBUG:
-  modbus_log_every_failure: true
-```
-
 6) **Run the daemon**:
 ```bash
 python3 -m ogm_pi.daemon --config config/ogm_pi.yaml
@@ -200,7 +192,7 @@ sudo ./scripts/install_pi.sh --board-name slave_pi --slave-address 99
 
 This installs OS deps, creates the service user, copies the repo to `/opt/OGM_slave_pi`,
 installs the venv, writes `/etc/ogm_pi/ogm_pi.yaml`, exports a pinmap to
-`/etc/ogm_pi/pinmap.json`, writes `<target-dir>/config/debug.yaml`, and enables systemd units.
+`/etc/ogm_pi/pinmap.json`, and enables systemd units.
 
 By default, the installer now prompts:
 - `Use default install config for GPIO14/15 RS485 [Y/n]`

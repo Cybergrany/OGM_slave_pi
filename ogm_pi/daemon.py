@@ -49,7 +49,6 @@ DEFAULT_SETTINGS = {
     "crash_dump_dir": None,
     "modbus_fail_open": False,
     "modbus_log_every_failure": False,
-    "debug_config_path": None,
 }
 
 
@@ -123,63 +122,6 @@ def build_settings(config: dict, cli: argparse.Namespace) -> dict:
             continue
         settings[key] = value
     return settings
-
-
-def _extract_modbus_debug_flag(data: object) -> bool | None:
-    """Extract per-failure Modbus logging flag from parsed debug config data."""
-    if isinstance(data, bool):
-        return data
-    if not isinstance(data, dict):
-        return None
-
-    if "modbus_log_every_failure" in data:
-        return as_bool(data.get("modbus_log_every_failure"), default=False)
-
-    debug_root = data.get("DEBUG")
-    if debug_root is None:
-        return None
-    if isinstance(debug_root, dict):
-        if "modbus_log_every_failure" in debug_root:
-            return as_bool(debug_root.get("modbus_log_every_failure"), default=False)
-        return None
-    return as_bool(debug_root, default=False)
-
-
-def resolve_modbus_debug_flag(settings: dict) -> tuple[bool, str | None]:
-    """Resolve modbus per-failure logging flag from main + runtime debug config."""
-    from_main = as_bool(settings.get("modbus_log_every_failure", False), default=False)
-    source = "main config/CLI" if from_main else None
-
-    candidates: list[Path] = []
-    explicit_path = settings.get("debug_config_path")
-    if explicit_path:
-        candidates.append(Path(str(explicit_path)))
-    candidates.append(Path.cwd() / "config" / "debug.yaml")
-    candidates.append(Path.cwd() / "config" / "debug.yml")
-
-    seen: set[Path] = set()
-    for path in candidates:
-        if path in seen:
-            continue
-        seen.add(path)
-        if not path.exists():
-            continue
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                data = yaml.safe_load(handle)
-        except OSError as exc:
-            print(f"ogm_pi: failed to read debug config {path}: {exc}", file=sys.stderr)
-            continue
-        except yaml.YAMLError as exc:
-            print(f"ogm_pi: failed to parse debug config {path}: {exc}", file=sys.stderr)
-            continue
-
-        parsed = _extract_modbus_debug_flag(data)
-        if parsed is None:
-            continue
-        return parsed, str(path)
-
-    return from_main, source
 
 
 def as_bool(value: object, *, default: bool) -> bool:
@@ -380,7 +322,7 @@ def main() -> int:
         )
         raise SystemExit(f"ogm_pi: {exc}")
     settings = build_settings(config, args)
-    modbus_log_every_failure, modbus_debug_source = resolve_modbus_debug_flag(settings)
+    modbus_log_every_failure = as_bool(settings.get("modbus_log_every_failure", False), default=False)
     settings["modbus_log_every_failure"] = modbus_log_every_failure
     failure_log = resolve_failure_log_path(settings)
     crash_dump_dir = resolve_crash_dump_dir(settings)
@@ -393,16 +335,8 @@ def main() -> int:
         LOGGER.info("Crash dump directory: %s", crash_dump_dir)
     else:
         LOGGER.warning("No writable crash dump directory found.")
-    if modbus_debug_source:
-        LOGGER.info(
-            "Modbus per-failure logging: %s (source: %s)",
-            "enabled" if modbus_log_every_failure else "disabled",
-            modbus_debug_source,
-        )
     if modbus_log_every_failure:
-        LOGGER.warning(
-            "DEBUG mode enabled: every recoverable Modbus failure will be logged at WARNING level."
-        )
+        LOGGER.warning("Modbus per-failure logging enabled via ogm_pi.yaml (modbus_log_every_failure=true).")
 
     if not settings.get("pinmap"):
         raise SystemExit("ogm_pi: pinmap path missing (set in config or pass --pinmap)")
