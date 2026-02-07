@@ -515,6 +515,8 @@ stats_interval: ${STATS_INTERVAL}
 log_level: ${LOG_LEVEL}
 failure_log: ${TARGET_DIR}/runtime_failures.log
 crash_dump_dir: ${TARGET_DIR}/crash_dumps
+modbus_log_every_failure: false
+modbus_show_all_frames: false
 EOF
 }
 
