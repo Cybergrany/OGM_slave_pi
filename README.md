@@ -295,6 +295,7 @@ from `ogm_pi.pin_runtime`.
 - Bridge child pinmaps are supported, but OGM_slave_pi itself remains a single Modbus slave (it does not act as a bridge).
 - If a pin is named `pi_cpu_temp_c_x100` or `pi_cpu_load_1m_x100`, the daemon will populate it from system metrics.
 - BOARD_STATS uptime uses the daemon service lifetime (resets on service restart).
+- BOARD_SHUTDOWN is an edge-triggered admin pin (`1 coil + 1 discrete online flag`): when its coil is set true the daemon runs `sudo shutdown now`, clears the coil, and sets online false. Wake is not implemented; bring the slave back by external power cycle.
 
 ## Example Raspberry Pi board entry
 
@@ -313,5 +314,6 @@ from `ogm_pi.pin_runtime`.
     - { name: pi_output_2, type: OUTPUT_DIGITAL, pin: 23, args: [0] }
     - { name: pi_cpu_temp_c_x100,  type: PLAIN_INPUT_REG, args: [0] }    # centigrade * 100
     - { name: pi_cpu_load_1m_x100, type: PLAIN_INPUT_REG, args: [0] }    # load avg * 100
+    - { name: SHUTDOWN, type: BOARD_SHUTDOWN, pin: 0 }                    # coil trigger + online DI
     - { name: RESET, type: BOARD_RESET, pin: 0 }
 ```

@@ -30,6 +30,7 @@ boards:
       - { name: pi_output_2, type: OUTPUT_DIGITAL, pin: 23, args: [0] }
       - { name: pi_cpu_temp_c_x100,  type: PLAIN_INPUT_REG, args: [0] }
       - { name: pi_cpu_load_1m_x100, type: PLAIN_INPUT_REG, args: [0] }
+      - { name: SHUTDOWN, type: BOARD_SHUTDOWN, pin: 0 }
       - { name: RESET, type: BOARD_RESET, pin: 0 }
   - name: corridor_switches
     address: 1

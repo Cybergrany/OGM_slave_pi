@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import logging
+import subprocess
 import threading
 import time
 
@@ -432,6 +433,46 @@ class BoardReset(PinHandler):
         self.coil.set(0)
 
 
+class BoardShutdown(PinHandler):
+    def __init__(self, pin: PinRecord, store: RegisterStore, runtime: "PinRuntime") -> None:
+        super().__init__(pin, store, runtime)
+        self.coil = RegHandle(store, "coils", pin.coils, 0)
+        self.online = RegHandle(store, "discretes", pin.discretes, 1)
+        self._command_in_flight = False
+
+    def init(self) -> None:
+        self.coil.set(0)
+        self.online.set(1)
+        self._command_in_flight = False
+
+    def update(self, _now: float) -> None:
+        if not self.coil.get():
+            return
+        self.coil.set(0)
+        self.online.set(0)
+        if self._command_in_flight:
+            LOGGER.warning("BoardShutdown already in flight; ignoring duplicate trigger")
+            return
+        self._command_in_flight = True
+        LOGGER.warning("Board shutdown triggered via BOARD_SHUTDOWN; executing 'sudo shutdown now'")
+        try:
+            subprocess.Popen(
+                ["sudo", "shutdown", "now"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            self._command_in_flight = False
+            LOGGER.exception("Failed to execute shutdown command: %s", exc)
+
+    def reset(self) -> None:
+        self.coil.set(0)
+        self.online.set(1)
+        self._command_in_flight = False
+
+
 class BoardStats(PinHandler):
     def __init__(self, pin: PinRecord, store: RegisterStore, runtime: "PinRuntime", interval_s: float) -> None:
         super().__init__(pin, store, runtime)
@@ -496,6 +537,7 @@ HANDLER_TYPES = {
     "OUTPUT_DIGITAL": OutputDigital,
     "OUTPUT_DIGITAL_AUTO_RELEASE": OutputDigitalAutoRelease,
     "BOARD_RESET": BoardReset,
+    "BOARD_SHUTDOWN": BoardShutdown,
     "BOARD_STATS": BoardStats,
 }
 
