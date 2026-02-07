@@ -342,6 +342,7 @@ def main() -> int:
     failure_log = resolve_failure_log_path(settings)
     crash_dump_dir = resolve_crash_dump_dir(settings)
     configure_logging(str(settings.get("log_level", "INFO")), failure_log=failure_log)
+    LOGGER.info("Reading daemon config from: %s", config_path)
     if failure_log:
         LOGGER.info("Persistent runtime/failure log: %s", failure_log)
     else:
