@@ -1,296 +1,370 @@
 #!/usr/bin/env python3
-"""Raw UART/Modbus RTU sniffer for Raspberry Pi troubleshooting.
+"""uart_modbus_sniffer.py
 
-Reads bytes from a serial port, splits traffic into frames using an idle gap,
-and prints each frame with Modbus CRC validation.
+Modbus RTU sniffer focused on robustness on Linux UARTs where reads can coalesce
+multiple frames.
+
+Key behavior:
+- Maintains a byte buffer.
+- Repeatedly tries to parse a frame at the head of the buffer.
+- If CRC matches for an expected frame length, consumes the frame.
+- If not, drops 1 byte and retries (resync).
+
+This avoids false CRC failures when multiple frames arrive back-to-back in one
+read(), and it is resilient to imperfect gap timing in userspace.
+
+Typical (master->slave request sniffing):
+  python3 uart_modbus_sniffer.py --port /dev/serial0 --baud 250000 \
+    --parity N --data-bits 8 --stop-bits 1 --expected-id 99 --assume-requests
+
+You can still set --frame-gap-us to additionally force a flush on idle, but the
+parser no longer relies on it for correctness.
 """
 
 from __future__ import annotations
 
 import argparse
-import signal
 import sys
 import time
-from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 try:
     import serial
-except ImportError as exc:  # pragma: no cover - runtime guard
-    raise SystemExit(
-        "pyserial is required. Install with: pip install pyserial"
-    ) from exc
+except ImportError:
+    print("ERROR: pyserial not installed. Try: sudo apt install python3-serial", file=sys.stderr)
+    raise
 
 
-def modbus_crc16(data: bytes) -> int:
-    """Compute Modbus CRC16 (poly 0xA001, init 0xFFFF)."""
+def crc16_modbus(data: bytes) -> int:
+    """Compute Modbus RTU CRC16 (poly 0xA001), returns 16-bit int."""
     crc = 0xFFFF
-    for byte in data:
-        crc ^= byte
+    for b in data:
+        crc ^= b
         for _ in range(8):
-            if crc & 0x0001:
+            if crc & 1:
                 crc = (crc >> 1) ^ 0xA001
             else:
                 crc >>= 1
     return crc & 0xFFFF
 
 
-def format_angle_hex(data: bytes) -> str:
-    return "".join(f"<{b:02X}>" for b in data)
+def u16_le(lo: int, hi: int) -> int:
+    return (hi << 8) | lo
 
 
-def parse_int_auto(text: str) -> int:
-    return int(text, 0)
-
-
-def bits_per_char(data_bits: int, parity: str, stop_bits: int) -> int:
-    parity_bits = 0 if parity.upper() == "N" else 1
-    return 1 + data_bits + parity_bits + stop_bits
-
-
-@dataclass
-class SnifferConfig:
-    port: str
-    baud: int
-    parity: str
-    data_bits: int
-    stop_bits: int
-    frame_gap_us: int
-    read_timeout_s: float
-    max_frames: int
-    max_seconds: float
-    expected_id: Optional[int]
-    chunk_max: int
-
-
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Standalone UART/Modbus RTU sniffer (frame + CRC view)."
-    )
-    parser.add_argument("--port", default="/dev/serial0", help="Serial port path")
-    parser.add_argument("--baud", type=int, default=250000, help="Baud rate")
-    parser.add_argument(
-        "--parity",
-        default="N",
-        choices=("N", "E", "O", "n", "e", "o"),
-        help="Parity",
-    )
-    parser.add_argument(
-        "--data-bits",
-        type=int,
-        default=8,
-        choices=(5, 6, 7, 8),
-        help="Data bits",
-    )
-    parser.add_argument(
-        "--stop-bits",
-        type=int,
-        default=1,
-        choices=(1, 2),
-        help="Stop bits",
-    )
-    parser.add_argument(
-        "--frame-gap-us",
-        type=int,
-        default=None,
-        help="Idle gap to terminate a frame (microseconds). Default: auto",
-    )
-    parser.add_argument(
-        "--read-timeout-ms",
-        type=int,
-        default=20,
-        help="Serial read timeout in milliseconds",
-    )
-    parser.add_argument(
-        "--max-frames",
-        type=int,
-        default=0,
-        help="Stop after N frames (0 = unlimited)",
-    )
-    parser.add_argument(
-        "--max-seconds",
-        type=float,
-        default=0.0,
-        help="Stop after N seconds (0 = unlimited)",
-    )
-    parser.add_argument(
-        "--expected-id",
-        type=parse_int_auto,
-        default=None,
-        help="Expected slave id (for hinting), accepts decimal or 0x..",
-    )
-    parser.add_argument(
-        "--chunk-max",
-        type=int,
-        default=256,
-        help="Maximum bytes read per poll",
-    )
-    return parser
-
-
-def to_serial_parity(parity: str) -> str:
-    p = parity.upper()
-    if p == "E":
-        return serial.PARITY_EVEN
-    if p == "O":
-        return serial.PARITY_ODD
-    return serial.PARITY_NONE
-
-
-def to_serial_bytesize(bits: int) -> int:
-    if bits == 5:
-        return serial.FIVEBITS
-    if bits == 6:
-        return serial.SIXBITS
-    if bits == 7:
-        return serial.SEVENBITS
-    return serial.EIGHTBITS
-
-
-def to_serial_stopbits(bits: int) -> float:
-    return serial.STOPBITS_TWO if bits == 2 else serial.STOPBITS_ONE
-
-
-def describe_frame(
-    idx: int,
-    frame: bytes,
-    elapsed_s: float,
-    expected_id: Optional[int],
-) -> str:
-    addr = frame[0] if frame else None
-    fc = frame[1] if len(frame) >= 2 else None
-
-    if len(frame) >= 4:
-        recv_crc = frame[-2] | (frame[-1] << 8)
-        calc_crc = modbus_crc16(frame[:-2])
-        crc_status = "OK" if recv_crc == calc_crc else "BAD"
-        crc_part = f"{crc_status} recv=0x{recv_crc:04X} calc=0x{calc_crc:04X}"
+def hexdump_angle(data: bytes, limit: int = 256) -> str:
+    # <63><04>... style
+    if len(data) > limit:
+        data = data[:limit]
+        suffix = "..."
     else:
-        crc_part = "N/A (len<4)"
+        suffix = ""
+    return "".join(f"<{b:02X}>" for b in data) + suffix
 
-    id_hint = ""
-    if expected_id is not None and addr is not None:
-        if addr == expected_id:
-            id_hint = " id=match"
-        elif addr == 0:
-            id_hint = " id=broadcast"
+
+def parse_expected_len(buf: bytearray, assume_requests: bool) -> Optional[int]:
+    """Return expected RTU frame length from header at buf[0:], if determinable.
+
+    This is not a full Modbus RTU implementation; it targets common function
+    codes and uses the RTU length rules.
+
+    If assume_requests=True, interpret FCs as master->slave requests.
+    If assume_requests=False, interpret FCs as slave->master responses.
+    """
+    if len(buf) < 2:
+        return None
+
+    fc = buf[1]
+
+    # Exception response: addr, fc|0x80, exc_code, crc_lo, crc_hi
+    if (fc & 0x80) != 0:
+        return 5
+
+    # Most common fixed-length requests/responses
+    if fc in (0x01, 0x02, 0x03, 0x04, 0x05, 0x06):
+        # Requests are always 8 bytes.
+        # Responses for 0x05/0x06 are also 8 bytes, but for 0x01-0x04 they are variable.
+        if assume_requests:
+            return 8
         else:
-            id_hint = f" id=mismatch(expected={expected_id})"
+            if fc in (0x05, 0x06):
+                return 8
+            # Read responses: addr, fc, byte_count, data..., crc
+            if len(buf) < 3:
+                return None
+            byte_count = buf[2]
+            return 5 + byte_count
 
-    return (
-        f"[{idx:06d}] t={elapsed_s:9.3f}s len={len(frame):3d} "
-        f"addr={addr if addr is not None else -1:3d} "
-        f"fc=0x{fc:02X} " if fc is not None else
-        f"[{idx:06d}] t={elapsed_s:9.3f}s len={len(frame):3d} addr= -1 fc=-- "
-    ) + f"crc={crc_part}{id_hint} data={format_angle_hex(frame)}"
+    # Write Multiple Coils / Registers (requests variable, responses 8)
+    if fc in (0x0F, 0x10):
+        if assume_requests:
+            # addr, fc, start_hi, start_lo, qty_hi, qty_lo, byte_count, data..., crc
+            if len(buf) < 7:
+                return None
+            byte_count = buf[6]
+            return 9 + byte_count
+        else:
+            return 8
+
+    # Mask Write Register (0x16) request/response are 10 bytes
+    if fc == 0x16:
+        return 10
+
+    # Read/Write Multiple Registers (0x17) request variable, response variable
+    if fc == 0x17:
+        if assume_requests:
+            # addr, fc, read_start(2), read_qty(2), write_start(2), write_qty(2), byte_count(1), write_data..., crc(2)
+            if len(buf) < 11:
+                return None
+            byte_count = buf[10]
+            return 13 + byte_count
+        else:
+            # addr, fc, byte_count, data..., crc
+            if len(buf) < 3:
+                return None
+            byte_count = buf[2]
+            return 5 + byte_count
+
+    # Unknown FC: can't infer length safely.
+    return None
 
 
-def main() -> int:
-    args = build_arg_parser().parse_args()
+def try_consume_frame(
+    buf: bytearray,
+    assume_requests: bool,
+) -> Optional[Tuple[bytes, bool, int, int]]:
+    """Try to parse and consume one frame from the start of buf.
 
-    parity = args.parity.upper()
-    bits = bits_per_char(args.data_bits, parity, args.stop_bits)
-    char_us = (bits * 1_000_000.0) / max(1, args.baud)
-    auto_gap = max(2_000, int(char_us * 8.0))
-    gap_us = args.frame_gap_us if args.frame_gap_us is not None else auto_gap
+    Returns (frame_bytes, crc_ok, recv_crc, calc_crc) if a full frame is present.
+    Returns None if not enough bytes or cannot infer length.
 
-    cfg = SnifferConfig(
-        port=args.port,
-        baud=args.baud,
-        parity=parity,
-        data_bits=args.data_bits,
-        stop_bits=args.stop_bits,
-        frame_gap_us=int(gap_us),
-        read_timeout_s=max(0.001, args.read_timeout_ms / 1000.0),
-        max_frames=max(0, int(args.max_frames)),
-        max_seconds=max(0.0, float(args.max_seconds)),
-        expected_id=args.expected_id,
-        chunk_max=max(1, int(args.chunk_max)),
-    )
+    Does NOT drop bytes on CRC failure; caller decides whether to resync.
+    """
+    exp_len = parse_expected_len(buf, assume_requests)
+    if exp_len is None:
+        return None
+    if len(buf) < exp_len:
+        return None
 
-    running = True
+    frame = bytes(buf[:exp_len])
+    recv_crc = u16_le(frame[-2], frame[-1])
+    calc_crc = crc16_modbus(frame[:-2])
+    crc_ok = (recv_crc == calc_crc)
+    return frame, crc_ok, recv_crc, calc_crc
 
-    def stop_handler(_signum: int, _frame) -> None:
-        nonlocal running
-        running = False
 
-    signal.signal(signal.SIGINT, stop_handler)
-    signal.signal(signal.SIGTERM, stop_handler)
+def describe_frame(frame: bytes) -> str:
+    if len(frame) < 2:
+        return ""
+    addr = frame[0]
+    fc = frame[1]
 
-    print(
-        f"Opening {cfg.port} @ {cfg.baud} {cfg.data_bits}{cfg.parity}{cfg.stop_bits} "
-        f"(frame_gap_us={cfg.frame_gap_us}, read_timeout_ms={int(cfg.read_timeout_s * 1000)})"
-    )
-    if cfg.expected_id is not None:
-        print(f"Expected slave id hint: {cfg.expected_id}")
+    # Exception
+    if (fc & 0x80) != 0 and len(frame) >= 5:
+        exc = frame[2]
+        return f"addr={addr:3d} fc=0x{fc:02X} exc=0x{exc:02X}"
+
+    # Common requests
+    if fc in (0x01, 0x02, 0x03, 0x04, 0x05, 0x06) and len(frame) >= 8:
+        # Read: addr, fc, start_hi, start_lo, qty_hi, qty_lo, crc...
+        if fc in (0x01, 0x02, 0x03, 0x04):
+            start = (frame[2] << 8) | frame[3]
+            qty = (frame[4] << 8) | frame[5]
+            return f"addr={addr:3d} fc=0x{fc:02X} start={start} qty={qty}"
+        # Write single coil/register
+        val = (frame[4] << 8) | frame[5]
+        reg = (frame[2] << 8) | frame[3]
+        return f"addr={addr:3d} fc=0x{fc:02X} reg={reg} val=0x{val:04X}"
+
+    # Read responses (addr, fc, byte_count, ...)
+    if fc in (0x01, 0x02, 0x03, 0x04) and len(frame) >= 5:
+        byte_count = frame[2]
+        return f"addr={addr:3d} fc=0x{fc:02X} bytes={byte_count}"
+
+    return f"addr={addr:3d} fc=0x{fc:02X}"
+
+
+def open_serial(args) -> serial.Serial:
+    parity_map = {
+        "N": serial.PARITY_NONE,
+        "E": serial.PARITY_EVEN,
+        "O": serial.PARITY_ODD,
+        "M": serial.PARITY_MARK,
+        "S": serial.PARITY_SPACE,
+    }
+    bytesize_map = {
+        5: serial.FIVEBITS,
+        6: serial.SIXBITS,
+        7: serial.SEVENBITS,
+        8: serial.EIGHTBITS,
+    }
+    stop_map = {
+        1: serial.STOPBITS_ONE,
+        2: serial.STOPBITS_TWO,
+    }
 
     try:
         ser = serial.Serial(
-            port=cfg.port,
-            baudrate=cfg.baud,
-            bytesize=to_serial_bytesize(cfg.data_bits),
-            parity=to_serial_parity(cfg.parity),
-            stopbits=to_serial_stopbits(cfg.stop_bits),
-            timeout=cfg.read_timeout_s,
-            xonxoff=False,
-            rtscts=False,
-            dsrdtr=False,
+            port=args.port,
+            baudrate=int(args.baud),
+            parity=parity_map[args.parity],
+            bytesize=bytesize_map[int(args.data_bits)],
+            stopbits=stop_map[int(args.stop_bits)],
+            timeout=0.02,        # short blocking read
+            write_timeout=0.0,
             exclusive=True,
         )
-    except Exception as exc:
-        print(f"Failed to open serial port {cfg.port}: {exc}", file=sys.stderr)
-        return 2
+    except TypeError:
+        # exclusive not supported on some pyserial builds
+        ser = serial.Serial(
+            port=args.port,
+            baudrate=int(args.baud),
+            parity=parity_map[args.parity],
+            bytesize=bytesize_map[int(args.data_bits)],
+            stopbits=stop_map[int(args.stop_bits)],
+            timeout=0.02,
+            write_timeout=0.0,
+        )
 
-    start_ns = time.perf_counter_ns()
-    frame = bytearray()
-    last_rx_ns = 0
-    frame_count = 0
+    # Try to reduce buffering latency
+    try:
+        ser.reset_input_buffer()
+        ser.reset_output_buffer()
+    except Exception:
+        pass
+
+    return ser
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", required=True)
+    ap.add_argument("--baud", required=True, type=int)
+    ap.add_argument("--parity", default="N", choices=["N", "E", "O", "M", "S"])
+    ap.add_argument("--data-bits", default=8, type=int, choices=[5, 6, 7, 8])
+    ap.add_argument("--stop-bits", default=1, type=int, choices=[1, 2])
+
+    ap.add_argument("--expected-id", type=int, default=None, help="If set, mark frames whose addr matches")
+    ap.add_argument("--assume-requests", action="store_true", help="Parse as master->slave requests (recommended)")
+    ap.add_argument("--assume-responses", action="store_true", help="Parse as slave->master responses")
+
+    ap.add_argument("--frame-gap-us", type=int, default=0,
+                    help="Optional: if >0, flush current buffer as a 'frame' after this idle gap (us). Parser still does CRC-based splitting.")
+
+    ap.add_argument("--max-buffer", type=int, default=4096)
+    ap.add_argument("--print-raw-limit", type=int, default=256)
+
+    args = ap.parse_args()
+
+    assume_requests = True
+    if args.assume_responses:
+        assume_requests = False
+    if args.assume_requests:
+        assume_requests = True
+
+    ser = open_serial(args)
+
+    t0 = time.monotonic()
+    last_byte_t = None  # type: Optional[float]
+
+    buf = bytearray()
+    frame_idx = 0
+    dropped = 0
+    crc_bad = 0
+
+    def flush_due_to_gap(now_t: float) -> bool:
+        if args.frame_gap_us <= 0:
+            return False
+        if last_byte_t is None:
+            return False
+        gap_s = args.frame_gap_us / 1_000_000.0
+        return (now_t - last_byte_t) >= gap_s
 
     try:
-        while running:
-            if cfg.max_seconds > 0.0:
-                if (time.perf_counter_ns() - start_ns) / 1e9 >= cfg.max_seconds:
-                    print("Reached --max-seconds, exiting.")
+        while True:
+            now = time.monotonic()
+
+            # Optional gap-based flush: if there's data in the buffer but we haven't
+            # received anything for a while, attempt parsing aggressively.
+            if buf and flush_due_to_gap(now):
+                # No special action needed: parsing below will run.
+                pass
+
+            n = ser.in_waiting
+            if n <= 0:
+                # Still parse buffered data in case buffer already has full frames.
+                pass
+            else:
+                chunk = ser.read(n)
+                if chunk:
+                    buf.extend(chunk)
+                    last_byte_t = now
+
+            # Prevent unbounded growth in the face of noise
+            if len(buf) > args.max_buffer:
+                # Drop oldest half
+                drop_n = len(buf) // 2
+                del buf[:drop_n]
+                dropped += drop_n
+
+            # Parse as many frames as possible
+            made_progress = True
+            while made_progress:
+                made_progress = False
+
+                res = try_consume_frame(buf, assume_requests=assume_requests)
+                if res is None:
                     break
 
-            want = ser.in_waiting
-            if want <= 0:
-                want = 1
-            else:
-                want = min(want, cfg.chunk_max)
+                frame, ok, recv_crc, calc_crc = res
+                if ok:
+                    frame_idx += 1
+                    addr = frame[0] if len(frame) else None
+                    fc = frame[1] if len(frame) > 1 else None
+                    id_match = (args.expected_id is not None and addr == args.expected_id)
 
-            block = ser.read(want)
-            now_ns = time.perf_counter_ns()
+                    t_rel = time.monotonic() - t0
+                    status = "OK" if ok else "BAD"
+                    match_txt = "match" if id_match else "-"
 
-            if block:
-                frame.extend(block)
-                last_rx_ns = now_ns
-                continue
+                    # Print line
+                    desc = describe_frame(frame)
+                    sys.stdout.write(
+                        f"[{frame_idx:06d}] t={t_rel:9.3f}s len={len(frame):3d} "
+                        f"{desc} crc={status} recv=0x{recv_crc:04X} calc=0x{calc_crc:04X} id={match_txt} "
+                        f"data={hexdump_angle(frame, limit=args.print_raw_limit)}\n"
+                    )
+                    sys.stdout.flush()
 
-            if frame and last_rx_ns:
-                idle_us = (now_ns - last_rx_ns) / 1000.0
-                if idle_us >= cfg.frame_gap_us:
-                    frame_count += 1
-                    elapsed_s = (now_ns - start_ns) / 1e9
-                    print(describe_frame(frame_count, bytes(frame), elapsed_s, cfg.expected_id), flush=True)
-                    frame.clear()
-                    last_rx_ns = 0
-                    if cfg.max_frames > 0 and frame_count >= cfg.max_frames:
-                        print("Reached --max-frames, exiting.")
-                        break
+                    # Consume
+                    del buf[:len(frame)]
+                    made_progress = True
+                else:
+                    # Resync: drop one byte and retry
+                    crc_bad += 1
+                    dropped += 1
+                    del buf[0]
+                    made_progress = True
+
+            # Avoid busy loop
+            if n <= 0 and not buf:
+                time.sleep(0.002)
+
+    except KeyboardInterrupt:
+        pass
     finally:
-        if frame:
-            frame_count += 1
-            elapsed_s = (time.perf_counter_ns() - start_ns) / 1e9
-            print(describe_frame(frame_count, bytes(frame), elapsed_s, cfg.expected_id), flush=True)
         try:
             ser.close()
         except Exception:
             pass
+
+        t_run = time.monotonic() - t0
+        sys.stderr.write(
+            f"\nStopped. runtime={t_run:.2f}s frames_ok={frame_idx} crc_resync_events={crc_bad} bytes_dropped={dropped}\n"
+        )
 
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
