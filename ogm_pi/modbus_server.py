@@ -603,6 +603,7 @@ class LibModbusBackend(ModbusBackend):
         stop_bits: int = 1,
         event_sink: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
         error_handler: Optional[Callable[[Exception], None]] = None,
+        log_every_recoverable_error: bool = False,
     ) -> None:
         self._store = store
         self._pinmap = pinmap
@@ -620,6 +621,7 @@ class LibModbusBackend(ModbusBackend):
         self._error_handler = error_handler
         self._shadow: Dict[str, List[int]] = {"coils": [], "holding_regs": []}
         self._recoverable_error_count = 0
+        self._log_every_recoverable_error = bool(log_every_recoverable_error)
 
     def start(self) -> None:
         totals = {
@@ -714,6 +716,14 @@ class LibModbusBackend(ModbusBackend):
     def _log_recoverable_error(self, exc: ModbusBackendError) -> None:
         self._recoverable_error_count += 1
         count = self._recoverable_error_count
+        if self._log_every_recoverable_error:
+            LOGGER.warning(
+                "Recoverable Modbus %s error (%s total): %s",
+                exc.operation,
+                count,
+                exc,
+            )
+            return
         if count == 1 or count == 10 or (count % 100) == 0:
             LOGGER.warning(
                 "Recoverable Modbus %s error (%s total): %s",
@@ -766,6 +776,7 @@ def create_backend(
     disabled: bool = False,
     event_sink: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     error_handler: Optional[Callable[[Exception], None]] = None,
+    log_every_recoverable_error: bool = False,
 ) -> ModbusBackend:
     """Factory for the Modbus backend (null backend when disabled)."""
     if disabled:
@@ -781,4 +792,5 @@ def create_backend(
         stop_bits,
         event_sink=event_sink,
         error_handler=error_handler,
+        log_every_recoverable_error=log_every_recoverable_error,
     )
