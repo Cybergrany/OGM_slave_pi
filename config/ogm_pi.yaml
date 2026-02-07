@@ -15,3 +15,5 @@ stats_interval: 5.0
 log_level: INFO
 # Set true to log every recoverable Modbus failure.
 modbus_log_every_failure: false
+# Set true to log every received Modbus request frame (very verbose).
+modbus_show_all_frames: false

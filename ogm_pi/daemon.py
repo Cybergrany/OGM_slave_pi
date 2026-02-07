@@ -49,6 +49,7 @@ DEFAULT_SETTINGS = {
     "crash_dump_dir": None,
     "modbus_fail_open": False,
     "modbus_log_every_failure": False,
+    "modbus_show_all_frames": False,
 }
 
 
@@ -88,6 +89,18 @@ def parse_args() -> argparse.Namespace:
         dest="modbus_fail_open",
         action="store_false",
         help="Exit daemon if Modbus backend fails",
+    )
+    parser.add_argument(
+        "--modbus-show-all-frames",
+        dest="modbus_show_all_frames",
+        action="store_true",
+        help="Log every received Modbus request frame (very verbose)",
+    )
+    parser.add_argument(
+        "--no-modbus-show-all-frames",
+        dest="modbus_show_all_frames",
+        action="store_false",
+        help="Disable per-frame Modbus request logging",
     )
     return parser.parse_args()
 
@@ -324,6 +337,8 @@ def main() -> int:
     settings = build_settings(config, args)
     modbus_log_every_failure = as_bool(settings.get("modbus_log_every_failure", False), default=False)
     settings["modbus_log_every_failure"] = modbus_log_every_failure
+    modbus_show_all_frames = as_bool(settings.get("modbus_show_all_frames", False), default=False)
+    settings["modbus_show_all_frames"] = modbus_show_all_frames
     failure_log = resolve_failure_log_path(settings)
     crash_dump_dir = resolve_crash_dump_dir(settings)
     configure_logging(str(settings.get("log_level", "INFO")), failure_log=failure_log)
@@ -337,6 +352,8 @@ def main() -> int:
         LOGGER.warning("No writable crash dump directory found.")
     if modbus_log_every_failure:
         LOGGER.warning("Modbus per-failure logging enabled via ogm_pi.yaml (modbus_log_every_failure=true).")
+    if modbus_show_all_frames:
+        LOGGER.warning("Modbus per-frame logging enabled via ogm_pi.yaml (modbus_show_all_frames=true).")
 
     if not settings.get("pinmap"):
         raise SystemExit("ogm_pi: pinmap path missing (set in config or pass --pinmap)")
@@ -420,6 +437,7 @@ def main() -> int:
         event_sink=server.publish_events,
         error_handler=on_modbus_error,
         log_every_recoverable_error=modbus_log_every_failure,
+        show_all_frames=modbus_show_all_frames,
     )
 
     # Start IPC serving early so local health checks remain responsive even if

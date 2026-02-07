@@ -79,6 +79,7 @@ baud: 250000
 slave_address: 99
 gpio_chip: /dev/gpiochip0
 modbus_log_every_failure: false
+modbus_show_all_frames: false
 ```
 For USB adapters instead of GPIO14/15 UART, use `serial: /dev/ttyUSB0` (or your adapter path).
 
