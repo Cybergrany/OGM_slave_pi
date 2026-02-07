@@ -394,6 +394,10 @@ def main() -> int:
             exc=exc,
             details={
                 "serial": str(settings["serial"]),
+                "baud": int(settings.get("baud", 250000)),
+                "parity": str(settings.get("parity", "N")),
+                "data_bits": int(settings.get("data_bits", 8)),
+                "stop_bits": int(settings.get("stop_bits", 1)),
                 "slave_address": int(slave_address),
                 "policy": "strict-fail-on-severe",
             },
@@ -459,6 +463,10 @@ def main() -> int:
                 exc=exc,
                 details={
                     "serial": str(settings["serial"]),
+                    "baud": int(settings.get("baud", 250000)),
+                    "parity": str(settings.get("parity", "N")),
+                    "data_bits": int(settings.get("data_bits", 8)),
+                    "stop_bits": int(settings.get("stop_bits", 1)),
                     "slave_address": int(slave_address),
                     "policy": "strict-fail-on-severe",
                 },
@@ -478,6 +486,10 @@ def main() -> int:
             exc=backend_start_error[0],
             details={
                 "serial": str(settings["serial"]),
+                "baud": int(settings.get("baud", 250000)),
+                "parity": str(settings.get("parity", "N")),
+                "data_bits": int(settings.get("data_bits", 8)),
+                "stop_bits": int(settings.get("stop_bits", 1)),
                 "slave_address": int(slave_address),
                 "policy": "strict-fail-on-severe",
             },
@@ -500,6 +512,10 @@ def main() -> int:
             exc=exc,
             details={
                 "serial": str(settings["serial"]),
+                "baud": int(settings.get("baud", 250000)),
+                "parity": str(settings.get("parity", "N")),
+                "data_bits": int(settings.get("data_bits", 8)),
+                "stop_bits": int(settings.get("stop_bits", 1)),
                 "slave_address": int(slave_address),
                 "policy": "strict-fail-on-severe",
             },

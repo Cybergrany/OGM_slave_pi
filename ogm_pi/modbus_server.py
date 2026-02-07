@@ -10,8 +10,13 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import errno
+import fcntl
 import logging
+import os
+import stat
+import sys
 import threading
+import termios
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
@@ -57,6 +62,54 @@ _REPLY_RECOVERABLE_LIBMODBUS_ERRNOS = {
     _EMBMDATA,
 }
 _STOP_INTERRUPT_ERRNOS = _errno_values("EBADF", "ENOTCONN", "EINVAL", "EIO", "EPIPE")
+
+_LIBMODBUS_STANDARD_BAUDS = {
+    110,
+    300,
+    600,
+    1200,
+    2400,
+    4800,
+    9600,
+    19200,
+    38400,
+    57600,
+    115200,
+    230400,
+    460800,
+    500000,
+    576000,
+    921600,
+    1000000,
+    1152000,
+    1500000,
+    2000000,
+    2500000,
+    3000000,
+    3500000,
+    4000000,
+}
+_CUSTOM_BAUD_CONNECT_FALLBACK = 115200
+
+# Linux ioctl constants for termios2 (TCGETS2/TCSETS2 + BOTHER custom speeds).
+_TCGETS2 = 0x802C542A
+_TCSETS2 = 0x402C542B
+_BOTHER = 0x1000
+_CBAUD = 0x100F
+_NCCS = 19
+
+
+class _Termios2(ctypes.Structure):
+    _fields_ = [
+        ("c_iflag", ctypes.c_uint32),
+        ("c_oflag", ctypes.c_uint32),
+        ("c_cflag", ctypes.c_uint32),
+        ("c_lflag", ctypes.c_uint32),
+        ("c_line", ctypes.c_ubyte),
+        ("c_cc", ctypes.c_ubyte * _NCCS),
+        ("c_ispeed", ctypes.c_uint32),
+        ("c_ospeed", ctypes.c_uint32),
+    ]
 
 
 class _ModbusMapping(ctypes.Structure):
@@ -239,6 +292,60 @@ class NullBackend(ModbusBackend):
         LOGGER.info("Modbus backend disabled; IPC-only mode")
 
 
+def _normalized_parity(parity: str) -> str:
+    value = (parity or "N").strip().upper()
+    if not value:
+        return "N"
+    ch = value[0]
+    if ch in {"N", "E", "O"}:
+        return ch
+    return "N"
+
+
+def _decode_termios_data_bits(cflag: int) -> int:
+    csize = cflag & int(termios.CSIZE)
+    if csize == int(termios.CS5):
+        return 5
+    if csize == int(termios.CS6):
+        return 6
+    if csize == int(termios.CS7):
+        return 7
+    if csize == int(termios.CS8):
+        return 8
+    return 0
+
+
+def _decode_termios_parity(cflag: int) -> str:
+    if (cflag & int(termios.PARENB)) == 0:
+        return "N"
+    if (cflag & int(termios.PARODD)) != 0:
+        return "O"
+    return "E"
+
+
+def _decode_termios_stop_bits(cflag: int) -> int:
+    return 2 if (cflag & int(termios.CSTOPB)) != 0 else 1
+
+
+def _baud_mismatch(expected: int, actual: int) -> bool:
+    if expected <= 0 or actual <= 0:
+        return True
+    tolerance = max(2, int(expected * 0.02))
+    return abs(expected - actual) > tolerance
+
+
+_TERMIO_SPEED_TO_BAUD: Dict[int, int] = {}
+for _name in dir(termios):
+    if not _name.startswith("B"):
+        continue
+    suffix = _name[1:]
+    if not suffix.isdigit():
+        continue
+    _value = getattr(termios, _name, None)
+    if isinstance(_value, int):
+        _TERMIO_SPEED_TO_BAUD[int(_value)] = int(suffix)
+
+
 class LibModbusAdapter:
     """Thin ctypes wrapper around libmodbus RTU slave APIs."""
 
@@ -260,6 +367,14 @@ class LibModbusAdapter:
         totals: Dict[str, int],
     ) -> None:
         self._serial = serial
+        self._serial_target = os.path.realpath(serial)
+        self._requested_baud = int(baud)
+        self._requested_parity = _normalized_parity(parity)
+        self._requested_data_bits = int(data_bits)
+        self._requested_stop_bits = int(stop_bits)
+        self._connect_baud = self._requested_baud
+        self._using_custom_baud = False
+        self._fd = -1
         self._sizes = {
             "coils": int(totals.get("coils", 0)),
             "discretes": int(totals.get("discretes", 0)),
@@ -334,6 +449,138 @@ class LibModbusAdapter:
         self._lib.modbus_strerror.argtypes = [ctypes.c_int]
         self._lib.modbus_strerror.restype = ctypes.c_char_p
 
+        if hasattr(self._lib, "modbus_get_socket"):
+            self._lib.modbus_get_socket.argtypes = [ctypes.c_void_p]
+            self._lib.modbus_get_socket.restype = ctypes.c_int
+
+    def _preflight_serial_device(self) -> None:
+        try:
+            st = os.stat(self._serial)
+        except OSError as exc:
+            raise RuntimeError(f"Serial device '{self._serial}' is unavailable: {exc}") from exc
+        if not stat.S_ISCHR(st.st_mode):
+            raise RuntimeError(f"Serial path '{self._serial}' is not a character device")
+
+        if os.path.basename(self._serial_target).startswith("ttyS"):
+            if self._requested_parity in {"E", "O"}:
+                raise RuntimeError(
+                    f"Serial device '{self._serial}' resolves to '{self._serial_target}' (mini UART) "
+                    f"which cannot satisfy requested parity {self._requested_parity}. Use PL011 (ttyAMA*) instead."
+                )
+            LOGGER.warning(
+                "Serial device %s resolves to %s (mini UART). High Modbus baud rates may be unreliable.",
+                self._serial,
+                self._serial_target,
+            )
+
+    def _read_termios2(self, fd: int) -> _Termios2:
+        if not sys.platform.startswith("linux"):
+            raise RuntimeError("termios2 runtime checks are Linux-only")
+        state = _Termios2()
+        try:
+            fcntl.ioctl(fd, _TCGETS2, state)
+        except OSError as exc:
+            raise RuntimeError(f"ioctl(TCGETS2) failed on fd={fd}: {exc}") from exc
+        return state
+
+    def _set_custom_baud_linux(self, fd: int, baud: int) -> None:
+        state = self._read_termios2(fd)
+        state.c_cflag &= ~_CBAUD
+        state.c_cflag |= _BOTHER
+        state.c_ispeed = int(baud)
+        state.c_ospeed = int(baud)
+        try:
+            fcntl.ioctl(fd, _TCSETS2, state)
+        except OSError as exc:
+            raise RuntimeError(f"ioctl(TCSETS2) failed while applying custom baud {baud}: {exc}") from exc
+
+    def _socket_fd(self, ctx: ctypes.c_void_p) -> int:
+        if not hasattr(self._lib, "modbus_get_socket"):
+            raise RuntimeError("libmodbus is missing modbus_get_socket; cannot verify serial runtime state")
+        fd = int(self._lib.modbus_get_socket(ctx))
+        if fd < 0:
+            raise RuntimeError("modbus_get_socket returned invalid fd")
+        return fd
+
+    def _runtime_diagnostics(self) -> Dict[str, Any]:
+        if self._ctx is None:
+            raise RuntimeError("libmodbus context is not initialized")
+        if self._fd < 0:
+            self._fd = self._socket_fd(self._ctx)
+
+        diag: Dict[str, Any] = {
+            "serial": self._serial,
+            "serial_target": self._serial_target,
+            "fd": int(self._fd),
+            "connect_baud": int(self._connect_baud),
+            "requested_baud": int(self._requested_baud),
+            "requested_parity": self._requested_parity,
+            "requested_data_bits": int(self._requested_data_bits),
+            "requested_stop_bits": int(self._requested_stop_bits),
+            "custom_baud": bool(self._using_custom_baud),
+            "is_tty": bool(os.isatty(self._fd)),
+        }
+
+        try:
+            state = self._read_termios2(self._fd)
+            cflag = int(state.c_cflag)
+            diag["actual_baud"] = int(state.c_ospeed)
+            diag["actual_ispeed"] = int(state.c_ispeed)
+            diag["actual_parity"] = _decode_termios_parity(cflag)
+            diag["actual_data_bits"] = _decode_termios_data_bits(cflag)
+            diag["actual_stop_bits"] = _decode_termios_stop_bits(cflag)
+            diag["termios_source"] = "termios2"
+        except RuntimeError as exc:
+            if self._using_custom_baud:
+                raise
+            try:
+                attrs = termios.tcgetattr(self._fd)
+            except termios.error as t_exc:
+                raise RuntimeError(f"Unable to read runtime serial attributes: {exc}; fallback failed: {t_exc}") from t_exc
+            cflag = int(attrs[2])
+            ispeed_const = int(attrs[4])
+            ospeed_const = int(attrs[5])
+            diag["actual_baud"] = int(_TERMIO_SPEED_TO_BAUD.get(ospeed_const, 0))
+            diag["actual_ispeed"] = int(_TERMIO_SPEED_TO_BAUD.get(ispeed_const, 0))
+            diag["actual_parity"] = _decode_termios_parity(cflag)
+            diag["actual_data_bits"] = _decode_termios_data_bits(cflag)
+            diag["actual_stop_bits"] = _decode_termios_stop_bits(cflag)
+            diag["termios_source"] = "tcgetattr"
+        return diag
+
+    def _verify_startup_serial_config(self) -> Dict[str, Any]:
+        diag = self._runtime_diagnostics()
+        issues: List[str] = []
+
+        if not bool(diag.get("is_tty")):
+            issues.append("fd is not a tty")
+
+        actual_baud = int(diag.get("actual_baud", 0) or 0)
+        if _baud_mismatch(self._requested_baud, actual_baud):
+            issues.append(f"baud mismatch requested={self._requested_baud} actual={actual_baud}")
+
+        if str(diag.get("actual_parity", "N")) != self._requested_parity:
+            issues.append(
+                f"parity mismatch requested={self._requested_parity} actual={diag.get('actual_parity')}"
+            )
+
+        if int(diag.get("actual_data_bits", 0) or 0) != self._requested_data_bits:
+            issues.append(
+                f"data bits mismatch requested={self._requested_data_bits} actual={diag.get('actual_data_bits')}"
+            )
+
+        if int(diag.get("actual_stop_bits", 0) or 0) != self._requested_stop_bits:
+            issues.append(
+                f"stop bits mismatch requested={self._requested_stop_bits} actual={diag.get('actual_stop_bits')}"
+            )
+
+        if issues:
+            raise RuntimeError(
+                f"Serial startup configuration check failed: {', '.join(issues)}. "
+                f"diagnostics={diag}"
+            )
+        return diag
+
     def _create_context(
         self,
         serial: str,
@@ -343,10 +590,35 @@ class LibModbusAdapter:
         stop_bits: int,
         slave_address: int,
     ) -> ctypes.c_void_p:
-        serial_bytes = serial.encode("utf-8")
-        parity_byte = (parity or "N").strip().upper().encode("ascii", "ignore")[:1] or b"N"
+        self._preflight_serial_device()
 
-        ctx = self._lib.modbus_new_rtu(serial_bytes, int(baud), parity_byte, int(data_bits), int(stop_bits))
+        requested_baud = int(baud)
+        self._using_custom_baud = requested_baud not in _LIBMODBUS_STANDARD_BAUDS
+        self._connect_baud = _CUSTOM_BAUD_CONNECT_FALLBACK if self._using_custom_baud else requested_baud
+
+        if self._using_custom_baud and not sys.platform.startswith("linux"):
+            raise RuntimeError(
+                f"Custom baud {requested_baud} requested on non-Linux platform; "
+                "TCSETS2/BOTHER custom-baud path is Linux-only"
+            )
+
+        if self._using_custom_baud:
+            LOGGER.warning(
+                "Requested non-standard baud %d; opening with %d then applying TCSETS2/BOTHER",
+                requested_baud,
+                self._connect_baud,
+            )
+
+        serial_bytes = serial.encode("utf-8")
+        parity_byte = _normalized_parity(parity).encode("ascii", "ignore")[:1] or b"N"
+
+        ctx = self._lib.modbus_new_rtu(
+            serial_bytes,
+            int(self._connect_baud),
+            parity_byte,
+            int(data_bits),
+            int(stop_bits),
+        )
         if not ctx:
             self._raise_modbus_error("new_rtu")
 
@@ -356,7 +628,25 @@ class LibModbusAdapter:
         if self._lib.modbus_connect(ctx) == -1:
             self._raise_modbus_error("connect")
 
-        return ctypes.c_void_p(ctx)
+        ctx_ptr = ctypes.c_void_p(ctx)
+        self._ctx = ctx_ptr
+        self._fd = self._socket_fd(ctx_ptr)
+        if self._using_custom_baud:
+            self._set_custom_baud_linux(self._fd, requested_baud)
+
+        diag = self._verify_startup_serial_config()
+        LOGGER.info(
+            "Serial runtime verified: %s -> %s baud=%s parity=%s bits=%s stop=%s custom=%s",
+            self._serial,
+            self._serial_target,
+            diag.get("actual_baud"),
+            diag.get("actual_parity"),
+            diag.get("actual_data_bits"),
+            diag.get("actual_stop_bits"),
+            self._using_custom_baud,
+        )
+
+        return ctx_ptr
 
     def _create_mapping(self) -> ctypes.POINTER(_ModbusMapping):
         mapping = self._lib.modbus_mapping_new(
@@ -538,6 +828,7 @@ class LibModbusAdapter:
             except Exception:
                 pass
             self._ctx = None
+            self._fd = -1
 
 
 def _u16_be(payload: bytes, offset: int) -> int:
@@ -706,6 +997,7 @@ class LibModbusBackend(ModbusBackend):
                 self._event_sink(events)
 
     def _handle_fatal_error(self, exc: Exception) -> None:
+        self._stop_event.set()
         LOGGER.exception("Fatal Modbus backend error: %s", exc)
         if self._error_handler is not None:
             try:
