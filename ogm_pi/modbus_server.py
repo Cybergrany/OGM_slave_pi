@@ -365,6 +365,7 @@ class LibModbusAdapter:
         stop_bits: int,
         slave_address: int,
         totals: Dict[str, int],
+        show_all_frames: bool = False,
     ) -> None:
         self._serial = serial
         self._serial_target = os.path.realpath(serial)
@@ -375,6 +376,7 @@ class LibModbusAdapter:
         self._connect_baud = self._requested_baud
         self._using_custom_baud = False
         self._fd = -1
+        self._show_all_frames = bool(show_all_frames)
         self._sizes = {
             "coils": int(totals.get("coils", 0)),
             "discretes": int(totals.get("discretes", 0)),
@@ -452,6 +454,9 @@ class LibModbusAdapter:
         if hasattr(self._lib, "modbus_get_socket"):
             self._lib.modbus_get_socket.argtypes = [ctypes.c_void_p]
             self._lib.modbus_get_socket.restype = ctypes.c_int
+        if hasattr(self._lib, "modbus_set_debug"):
+            self._lib.modbus_set_debug.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            self._lib.modbus_set_debug.restype = ctypes.c_int
 
     def _preflight_serial_device(self) -> None:
         try:
@@ -622,6 +627,16 @@ class LibModbusAdapter:
         if not ctx:
             self._raise_modbus_error("new_rtu")
 
+        if self._show_all_frames:
+            if hasattr(self._lib, "modbus_set_debug"):
+                if self._lib.modbus_set_debug(ctx, 1) == -1:
+                    self._raise_modbus_error("set_debug")
+            else:
+                LOGGER.warning(
+                    "modbus_show_all_frames enabled but libmodbus lacks modbus_set_debug; "
+                    "logging only decoded request frames"
+                )
+
         if self._lib.modbus_set_slave(ctx, int(slave_address)) == -1:
             self._raise_modbus_error("set_slave")
 
@@ -790,7 +805,10 @@ class LibModbusAdapter:
             self._raise_modbus_error("receive")
         if rc <= 0:
             return 0, b""
-        return int(rc), bytes(self._request[:rc])
+        request = bytes(self._request[:rc])
+        if self._show_all_frames:
+            LOGGER.info("Modbus RX frame len=%d bytes: %s", int(rc), request.hex(" "))
+        return int(rc), request
 
     def reply(self, request_len: int) -> None:
         """Reply to the last request using current libmodbus mapping values."""
@@ -895,6 +913,7 @@ class LibModbusBackend(ModbusBackend):
         event_sink: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
         error_handler: Optional[Callable[[Exception], None]] = None,
         log_every_recoverable_error: bool = False,
+        show_all_frames: bool = False,
     ) -> None:
         self._store = store
         self._pinmap = pinmap
@@ -913,6 +932,7 @@ class LibModbusBackend(ModbusBackend):
         self._shadow: Dict[str, List[int]] = {"coils": [], "holding_regs": []}
         self._recoverable_error_count = 0
         self._log_every_recoverable_error = bool(log_every_recoverable_error)
+        self._show_all_frames = bool(show_all_frames)
 
     def start(self) -> None:
         totals = {
@@ -930,6 +950,7 @@ class LibModbusBackend(ModbusBackend):
             self._stop_bits,
             self._slave_address,
             totals,
+            show_all_frames=self._show_all_frames,
         )
 
         initial = self._store.snapshot_tables()
@@ -1069,6 +1090,7 @@ def create_backend(
     event_sink: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     error_handler: Optional[Callable[[Exception], None]] = None,
     log_every_recoverable_error: bool = False,
+    show_all_frames: bool = False,
 ) -> ModbusBackend:
     """Factory for the Modbus backend (null backend when disabled)."""
     if disabled:
@@ -1085,4 +1107,5 @@ def create_backend(
         event_sink=event_sink,
         error_handler=error_handler,
         log_every_recoverable_error=log_every_recoverable_error,
+        show_all_frames=show_all_frames,
     )
