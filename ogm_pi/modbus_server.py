@@ -36,6 +36,9 @@ _EMBUNKEXC = 112345692
 _EMBMDATA = 112345693
 _EMBBADSLAVE = 112345694
 
+# modbus_set_error_recovery flags (modbus.h)
+_MODBUS_ERROR_RECOVERY_PROTOCOL = 1 << 2
+
 
 def _errno_values(*names: str) -> Set[int]:
     values: Set[int] = set()
@@ -62,6 +65,12 @@ _REPLY_RECOVERABLE_LIBMODBUS_ERRNOS = {
     _EMBMDATA,
 }
 _STOP_INTERRUPT_ERRNOS = _errno_values("EBADF", "ENOTCONN", "EINVAL", "EIO", "EPIPE")
+_RESYNC_RECEIVE_LIBMODBUS_ERRNOS = {
+    _EMBBADCRC,
+    _EMBBADDATA,
+    _EMBBADEXC,
+    _EMBUNKEXC,
+}
 
 _LIBMODBUS_STANDARD_BAUDS = {
     110,
@@ -451,9 +460,15 @@ class LibModbusAdapter:
         self._lib.modbus_strerror.argtypes = [ctypes.c_int]
         self._lib.modbus_strerror.restype = ctypes.c_char_p
 
+        if hasattr(self._lib, "modbus_flush"):
+            self._lib.modbus_flush.argtypes = [ctypes.c_void_p]
+            self._lib.modbus_flush.restype = ctypes.c_int
         if hasattr(self._lib, "modbus_get_socket"):
             self._lib.modbus_get_socket.argtypes = [ctypes.c_void_p]
             self._lib.modbus_get_socket.restype = ctypes.c_int
+        if hasattr(self._lib, "modbus_set_error_recovery"):
+            self._lib.modbus_set_error_recovery.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            self._lib.modbus_set_error_recovery.restype = ctypes.c_int
         if hasattr(self._lib, "modbus_set_debug"):
             self._lib.modbus_set_debug.argtypes = [ctypes.c_void_p, ctypes.c_int]
             self._lib.modbus_set_debug.restype = ctypes.c_int
@@ -506,6 +521,58 @@ class LibModbusAdapter:
         if fd < 0:
             raise RuntimeError("modbus_get_socket returned invalid fd")
         return fd
+
+    def _configure_protocol_recovery(self, ctx: ctypes.c_void_p) -> None:
+        if not hasattr(self._lib, "modbus_set_error_recovery"):
+            LOGGER.warning(
+                "libmodbus missing modbus_set_error_recovery; relying on explicit flush-based resync only"
+            )
+            return
+        mode = int(_MODBUS_ERROR_RECOVERY_PROTOCOL)
+        rc = self._lib.modbus_set_error_recovery(ctx, mode)
+        if rc == -1:
+            code = int(ctypes.get_errno())
+            LOGGER.warning(
+                "modbus_set_error_recovery(PROTOCOL) failed (errno=%s: %s); "
+                "continuing with explicit flush-based resync",
+                code,
+                self._error_message(code),
+            )
+            return
+        LOGGER.info("Enabled libmodbus protocol recovery (mode=0x%X)", mode)
+
+    def flush_receive_buffer(self, reason: str) -> bool:
+        """Discard unread RX bytes to force RTU framing resynchronization."""
+        if self._ctx is None:
+            return False
+
+        if hasattr(self._lib, "modbus_flush"):
+            rc = self._lib.modbus_flush(self._ctx)
+            if rc != -1:
+                LOGGER.debug("Flushed Modbus RX buffer via modbus_flush (%s)", reason)
+                return True
+            code = int(ctypes.get_errno())
+            LOGGER.warning(
+                "modbus_flush failed while %s (errno=%s: %s); attempting tcflush fallback",
+                reason,
+                code,
+                self._error_message(code),
+            )
+
+        if self._fd < 0:
+            try:
+                self._fd = self._socket_fd(self._ctx)
+            except Exception as exc:
+                LOGGER.warning("Unable to resolve serial fd for fallback flush (%s): %s", reason, exc)
+                return False
+
+        try:
+            termios.tcflush(self._fd, termios.TCIFLUSH)
+        except termios.error as exc:
+            LOGGER.warning("tcflush(TCIFLUSH) failed while %s: %s", reason, exc)
+            return False
+        LOGGER.debug("Flushed Modbus RX buffer via tcflush(TCIFLUSH) (%s)", reason)
+        return True
 
     def _runtime_diagnostics(self) -> Dict[str, Any]:
         if self._ctx is None:
@@ -645,9 +712,11 @@ class LibModbusAdapter:
 
         ctx_ptr = ctypes.c_void_p(ctx)
         self._ctx = ctx_ptr
+        self._configure_protocol_recovery(ctx_ptr)
         self._fd = self._socket_fd(ctx_ptr)
         if self._using_custom_baud:
             self._set_custom_baud_linux(self._fd, requested_baud)
+        self.flush_receive_buffer("startup/initial-resync")
 
         diag = self._verify_startup_serial_config()
         LOGGER.info(
@@ -1047,6 +1116,15 @@ class LibModbusBackend(ModbusBackend):
         else:
             LOGGER.debug("Recoverable Modbus %s error: %s", exc.operation, exc)
 
+    def _maybe_resync_after_recoverable_error(self, exc: ModbusBackendError) -> None:
+        if self._adapter is None:
+            return
+        if exc.operation != "receive":
+            return
+        if exc.errno_code is None or exc.errno_code not in _RESYNC_RECEIVE_LIBMODBUS_ERRNOS:
+            return
+        self._adapter.flush_receive_buffer(f"recoverable-{exc.operation}-errno-{exc.errno_code}")
+
     def _serve_loop(self) -> None:
         if self._adapter is None:
             return
@@ -1068,6 +1146,7 @@ class LibModbusBackend(ModbusBackend):
                     break
                 if not exc.fatal:
                     self._log_recoverable_error(exc)
+                    self._maybe_resync_after_recoverable_error(exc)
                     continue
                 self._handle_fatal_error(exc)
                 break
