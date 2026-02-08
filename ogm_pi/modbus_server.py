@@ -1060,8 +1060,7 @@ class LibModbusAdapter:
                             continue
 
                         self._suppress_reply = (address == 0)
-                        for idx, byte in enumerate(frame):
-                            self._request[idx] = int(byte)
+                        ctypes.memmove(ctypes.addressof(self._request), frame, expected_len)
                         self._bump_rx_stat("rx_ok")
                         if self._show_all_frames:
                             LOGGER.info("Modbus RX frame len=%d bytes: %s", expected_len, frame.hex(" "))
@@ -1326,13 +1325,6 @@ class LibModbusBackend(ModbusBackend):
             return
         LOGGER.debug("Recoverable Modbus %s error: %s", exc.operation, exc)
 
-    def _maybe_resync_after_recoverable_error(self, exc: ModbusBackendError) -> None:
-        # Disabled intentionally: flushing on receive-side CRC/resync errors can drop
-        # valid trailing bytes from the next frame on busy RS485 buses.
-        # if self._adapter is not None:
-        #     self._adapter.flush_receive_buffer(f"recoverable-{exc.operation}-errno-{exc.errno_code}")
-        _ = exc
-
     def _serve_loop(self) -> None:
         if self._adapter is None:
             return
@@ -1354,7 +1346,6 @@ class LibModbusBackend(ModbusBackend):
                     break
                 if not exc.fatal:
                     self._log_recoverable_error(exc)
-                    # self._maybe_resync_after_recoverable_error(exc)
                     continue
                 self._handle_fatal_error(exc)
                 break

@@ -134,11 +134,33 @@ class RegisterStore:
             buffer = self._select_buffer(reg_name)
             return self._read_span(buffer, span)
 
+    def read_register_index(self, reg_name: str, idx: int) -> int:
+        """Read a single register value by table name and absolute index."""
+        with self._lock:
+            buffer = self._select_buffer(reg_name)
+            index = int(idx)
+            if index < 0 or index >= len(buffer):
+                raise ValueError(f"Index {index} out of range for {reg_name} table")
+            return int(buffer[index])
+
     def write_registers(self, reg_name: str, span: RegSpan, payload: Any) -> None:
         """Write a span to a register table by name."""
         with self._lock:
             buffer, coercer = self._select_buffer(reg_name, with_coercer=True)
             self._write_span(buffer, span, payload, reg_name, coercer, track_dirty=True)
+
+    def write_register_index(self, reg_name: str, idx: int, value: Any) -> None:
+        """Write a single register value by table name and absolute index."""
+        with self._lock:
+            buffer, coercer = self._select_buffer(reg_name, with_coercer=True)
+            index = int(idx)
+            if index < 0 or index >= len(buffer):
+                raise ValueError(f"Index {index} out of range for {reg_name} table")
+            coerced = coercer(value)
+            if buffer[index] == coerced:
+                return
+            buffer[index] = coerced
+            self._record_update_unlocked(reg_name, index, coerced)
 
     def consume_dirty_updates(self, names: List[str] | tuple[str, ...] | None = None) -> Dict[str, List[tuple[int, int]]]:
         """Return and clear pending sparse updates since the last consume."""

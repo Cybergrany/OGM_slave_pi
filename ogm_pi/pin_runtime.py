@@ -101,22 +101,24 @@ class RegHandle:
     span: RegSpan
     initial: int
     valid: bool = True
+    index: int = 0
 
     def __post_init__(self) -> None:
         if self.span.count != 1:
             LOGGER.warning("Expected 1 %s register, got %s", self.reg_name, self.span.count)
             self.valid = False
+            return
+        self.index = int(self.span.start)
 
     def get(self) -> int:
         if not self.valid:
             return self.initial
-        values = self.store.read_registers(self.reg_name, self.span)
-        return int(values[0]) if values else self.initial
+        return self.store.read_register_index(self.reg_name, self.index)
 
     def set(self, value: int) -> None:
         if not self.valid:
             return
-        self.store.write_registers(self.reg_name, self.span, value)
+        self.store.write_register_index(self.reg_name, self.index, value)
 
     def reset(self) -> None:
         self.set(self.initial)
