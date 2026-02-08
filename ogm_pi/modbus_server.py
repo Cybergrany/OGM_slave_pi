@@ -19,7 +19,6 @@ import sys
 import threading
 import termios
 import time
-from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
 from .pinmap import PinMap, PinRecord
@@ -140,14 +139,6 @@ class ModbusBackendError(RuntimeError):
         self.errno_code = errno_code
 
 
-@dataclass
-class ChangeSet:
-    """Sparse index updates plus the corresponding event payloads."""
-
-    updates: Dict[str, List[tuple[int, int]]]
-    events: List[Dict[str, Any]]
-
-
 class ChangeTracker:
     """Detect master-originated changes and build event payloads."""
 
@@ -157,29 +148,6 @@ class ChangeTracker:
         self._coil_index = self._build_index_map(pinmap.pins, totals.get("coils", 0), "coils")
         self._holding_index = self._build_index_map(pinmap.pins, totals.get("holding_regs", 0), "holding_regs")
         self._seq = 0
-
-    def diff(self, before: Dict[str, List[int]], after: Dict[str, List[int]]) -> ChangeSet:
-        """Compute sparse updates and change events between two table snapshots."""
-        updates: Dict[str, List[tuple[int, int]]] = {"coils": [], "holding_regs": []}
-        changed: Dict[str, Set[str]] = {}
-
-        self._scan_table(
-            "coils",
-            before.get("coils", []),
-            after.get("coils", []),
-            self._coil_index,
-            updates,
-            changed,
-        )
-        self._scan_table(
-            "holding_regs",
-            before.get("holding_regs", []),
-            after.get("holding_regs", []),
-            self._holding_index,
-            updates,
-            changed,
-        )
-        return ChangeSet(updates=updates, events=self._build_events(changed, after))
 
     def events_from_updates(self, updates: Dict[str, List[tuple[int, int]]], tables: Dict[str, List[int]]) -> List[Dict[str, Any]]:
         """Build change events from sparse updates and current table snapshots."""
@@ -242,31 +210,6 @@ class ChangeTracker:
             for idx in range(start, end):
                 index[idx] = pin
         return index
-
-    @staticmethod
-    def _scan_table(
-        name: str,
-        before: List[int],
-        after: List[int],
-        index_map: List[Optional[PinRecord]],
-        updates: Dict[str, List[tuple[int, int]]],
-        changed: Dict[str, Set[str]],
-    ) -> None:
-        """Compare two tables and update the change tracking structures."""
-        if not before or not after:
-            return
-        max_len = min(len(before), len(after), len(index_map) if index_map else len(after))
-        if max_len <= 0:
-            return
-        for idx in range(max_len):
-            old_val = before[idx]
-            new_val = after[idx]
-            if old_val == new_val:
-                continue
-            updates[name].append((idx, new_val))
-            pin = index_map[idx] if idx < len(index_map) else None
-            if pin is not None:
-                changed.setdefault(pin.name, set()).add(name)
 
     @staticmethod
     def _slice_values(values: List[int], start: int, count: int) -> List[int]:
@@ -469,15 +412,15 @@ class LibModbusAdapter:
         self._lib.modbus_strerror.argtypes = [ctypes.c_int]
         self._lib.modbus_strerror.restype = ctypes.c_char_p
 
-        if hasattr(self._lib, "modbus_flush"):
-            self._lib.modbus_flush.argtypes = [ctypes.c_void_p]
-            self._lib.modbus_flush.restype = ctypes.c_int
-        if hasattr(self._lib, "modbus_get_socket"):
-            self._lib.modbus_get_socket.argtypes = [ctypes.c_void_p]
-            self._lib.modbus_get_socket.restype = ctypes.c_int
-        if hasattr(self._lib, "modbus_set_error_recovery"):
-            self._lib.modbus_set_error_recovery.argtypes = [ctypes.c_void_p, ctypes.c_int]
-            self._lib.modbus_set_error_recovery.restype = ctypes.c_int
+        if not hasattr(self._lib, "modbus_get_socket"):
+            raise RuntimeError("libmodbus is missing required symbol modbus_get_socket")
+        self._lib.modbus_get_socket.argtypes = [ctypes.c_void_p]
+        self._lib.modbus_get_socket.restype = ctypes.c_int
+
+        if not hasattr(self._lib, "modbus_set_error_recovery"):
+            raise RuntimeError("libmodbus is missing required symbol modbus_set_error_recovery")
+        self._lib.modbus_set_error_recovery.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self._lib.modbus_set_error_recovery.restype = ctypes.c_int
 
     def _preflight_serial_device(self) -> None:
         try:
@@ -521,30 +464,19 @@ class LibModbusAdapter:
             raise RuntimeError(f"ioctl(TCSETS2) failed while applying custom baud {baud}: {exc}") from exc
 
     def _socket_fd(self, ctx: ctypes.c_void_p) -> int:
-        if not hasattr(self._lib, "modbus_get_socket"):
-            raise RuntimeError("libmodbus is missing modbus_get_socket; cannot verify serial runtime state")
         fd = int(self._lib.modbus_get_socket(ctx))
         if fd < 0:
             raise RuntimeError("modbus_get_socket returned invalid fd")
         return fd
 
     def _configure_protocol_recovery(self, ctx: ctypes.c_void_p) -> None:
-        if not hasattr(self._lib, "modbus_set_error_recovery"):
-            LOGGER.warning(
-                "libmodbus missing modbus_set_error_recovery; relying on explicit flush-based resync only"
-            )
-            return
         mode = int(_MODBUS_ERROR_RECOVERY_PROTOCOL)
         rc = self._lib.modbus_set_error_recovery(ctx, mode)
         if rc == -1:
             code = int(ctypes.get_errno())
-            LOGGER.warning(
-                "modbus_set_error_recovery(PROTOCOL) failed (errno=%s: %s); "
-                "continuing with explicit flush-based resync",
-                code,
-                self._error_message(code),
+            raise RuntimeError(
+                f"modbus_set_error_recovery(PROTOCOL) failed (errno={code}: {self._error_message(code)})"
             )
-            return
         LOGGER.info("Enabled libmodbus protocol recovery (mode=0x%X)", mode)
 
     def flush_receive_buffer(self, reason: str) -> bool:
@@ -552,29 +484,16 @@ class LibModbusAdapter:
         if self._ctx is None:
             return False
 
-        if hasattr(self._lib, "modbus_flush"):
-            rc = self._lib.modbus_flush(self._ctx)
-            if rc != -1:
-                LOGGER.debug("Flushed Modbus RX buffer via modbus_flush (%s)", reason)
-                return True
-            code = int(ctypes.get_errno())
-            LOGGER.warning(
-                "modbus_flush failed while %s (errno=%s: %s); attempting tcflush fallback",
-                reason,
-                code,
-                self._error_message(code),
-            )
-
         if self._fd < 0:
             try:
                 self._fd = self._socket_fd(self._ctx)
             except Exception as exc:
-                LOGGER.warning("Unable to resolve serial fd for fallback flush (%s): %s", reason, exc)
+                LOGGER.warning("Unable to resolve serial fd while flushing RX (%s): %s", reason, exc)
                 return False
 
         try:
             termios.tcflush(self._fd, termios.TCIFLUSH)
-        except termios.error as exc:
+        except (termios.error, OSError) as exc:
             LOGGER.warning("tcflush(TCIFLUSH) failed while %s: %s", reason, exc)
             return False
         LOGGER.debug("Flushed Modbus RX buffer via tcflush(TCIFLUSH) (%s)", reason)
@@ -787,8 +706,6 @@ class LibModbusAdapter:
         return int(value) & 0xFFFF
 
     def _is_recoverable_errno(self, code: int, operation: str) -> bool:
-        if operation == "receive":
-            return code in _RECOVERABLE_POSIX_ERRNOS
         if operation == "reply":
             return code in _REPLY_RECOVERABLE_POSIX_ERRNOS or code in _REPLY_RECOVERABLE_LIBMODBUS_ERRNOS
         return False
@@ -1210,8 +1127,8 @@ class LibModbusBackend(ModbusBackend):
         self._event_sink = event_sink
         self._error_handler = error_handler
         self._shadow: Dict[str, List[int]] = {"coils": [], "holding_regs": []}
-        self._recoverable_error_count = 0
         self._log_every_recoverable_error = bool(log_every_recoverable_error)
+        self._recoverable_error_count: Optional[int] = 0 if self._log_every_recoverable_error else None
         self._show_all_frames = bool(show_all_frames)
 
     def start(self) -> None:
@@ -1308,9 +1225,9 @@ class LibModbusBackend(ModbusBackend):
                 LOGGER.exception("Modbus error handler failed")
 
     def _log_recoverable_error(self, exc: ModbusBackendError) -> None:
-        self._recoverable_error_count += 1
-        count = self._recoverable_error_count
         if self._log_every_recoverable_error:
+            count = int(self._recoverable_error_count or 0) + 1
+            self._recoverable_error_count = count
             rx_stats = ""
             if self._adapter is not None:
                 rx_stats = self._adapter.format_rx_stats()
@@ -1323,7 +1240,8 @@ class LibModbusBackend(ModbusBackend):
                 suffix,
             )
             return
-        LOGGER.debug("Recoverable Modbus %s error: %s", exc.operation, exc)
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.debug("Recoverable Modbus %s error: %s", exc.operation, exc)
 
     def _serve_loop(self) -> None:
         if self._adapter is None:
