@@ -13,10 +13,12 @@ import errno
 import fcntl
 import logging
 import os
+import select
 import stat
 import sys
 import threading
 import termios
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
@@ -29,12 +31,10 @@ WATCH_TYPES = ("coils", "holding_regs")
 _RTU_MAX_ADU_LENGTH = 260
 
 # libmodbus custom errno values (modbus.h)
-_EMBBADCRC = 112345689
 _EMBBADDATA = 112345690
 _EMBBADEXC = 112345691
 _EMBUNKEXC = 112345692
 _EMBMDATA = 112345693
-_EMBBADSLAVE = 112345694
 
 # modbus_set_error_recovery flags (modbus.h)
 _MODBUS_ERROR_RECOVERY_PROTOCOL = 1 << 2
@@ -49,15 +49,8 @@ def _errno_values(*names: str) -> Set[int]:
     return values
 
 
-_RECOVERABLE_POSIX_ERRNOS = _errno_values("EAGAIN", "EINTR", "ETIMEDOUT")
+_RECOVERABLE_POSIX_ERRNOS = _errno_values("EAGAIN", "EINTR", "ETIMEDOUT", "EWOULDBLOCK")
 _REPLY_RECOVERABLE_POSIX_ERRNOS = _RECOVERABLE_POSIX_ERRNOS | _errno_values("EMSGSIZE")
-_RECEIVE_RECOVERABLE_LIBMODBUS_ERRNOS = {
-    _EMBBADCRC,
-    _EMBBADDATA,
-    _EMBBADEXC,
-    _EMBUNKEXC,
-    _EMBBADSLAVE,
-}
 _REPLY_RECOVERABLE_LIBMODBUS_ERRNOS = {
     _EMBBADDATA,
     _EMBBADEXC,
@@ -65,12 +58,11 @@ _REPLY_RECOVERABLE_LIBMODBUS_ERRNOS = {
     _EMBMDATA,
 }
 _STOP_INTERRUPT_ERRNOS = _errno_values("EBADF", "ENOTCONN", "EINVAL", "EIO", "EPIPE")
-_RESYNC_RECEIVE_LIBMODBUS_ERRNOS = {
-    _EMBBADCRC,
-    _EMBBADDATA,
-    _EMBBADEXC,
-    _EMBUNKEXC,
-}
+
+_RX_READ_CHUNK_MAX = 4096
+_RX_COMPACT_THRESHOLD = 1024
+_RX_MAX_BUFFER = 16 * _RTU_MAX_ADU_LENGTH
+_RX_IDLE_PARTIAL_TIMEOUT_S = 0.020
 
 _LIBMODBUS_STANDARD_BAUDS = {
     110,
@@ -375,6 +367,7 @@ class LibModbusAdapter:
         slave_address: int,
         totals: Dict[str, int],
         show_all_frames: bool = False,
+        log_every_recoverable_error: bool = False,
     ) -> None:
         self._serial = serial
         self._serial_target = os.path.realpath(serial)
@@ -382,10 +375,29 @@ class LibModbusAdapter:
         self._requested_parity = _normalized_parity(parity)
         self._requested_data_bits = int(data_bits)
         self._requested_stop_bits = int(stop_bits)
+        self._slave_address = int(slave_address)
         self._connect_baud = self._requested_baud
         self._using_custom_baud = False
         self._fd = -1
         self._show_all_frames = bool(show_all_frames)
+        self._log_rx_details = bool(log_every_recoverable_error)
+        self._rx_stats: Optional[Dict[str, int]] = (
+            {
+                "rx_ok": 0,
+                "rx_crc_bad": 0,
+                "rx_resync_bytes": 0,
+                "rx_foreign_frames": 0,
+                "rx_partial_timeout_drops": 0,
+                "rx_len_reject": 0,
+                "rx_buffer_trim": 0,
+            }
+            if self._log_rx_details
+            else None
+        )
+        self._rx_buf = bytearray()
+        self._rx_head = 0
+        self._rx_last_append_monotonic = 0.0
+        self._suppress_reply = False
         self._sizes = {
             "coils": int(totals.get("coils", 0)),
             "discretes": int(totals.get("discretes", 0)),
@@ -434,9 +446,6 @@ class LibModbusAdapter:
         self._lib.modbus_connect.argtypes = [ctypes.c_void_p]
         self._lib.modbus_connect.restype = ctypes.c_int
 
-        self._lib.modbus_receive.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8)]
-        self._lib.modbus_receive.restype = ctypes.c_int
-
         self._lib.modbus_reply.argtypes = [
             ctypes.c_void_p,
             ctypes.POINTER(ctypes.c_uint8),
@@ -469,9 +478,6 @@ class LibModbusAdapter:
         if hasattr(self._lib, "modbus_set_error_recovery"):
             self._lib.modbus_set_error_recovery.argtypes = [ctypes.c_void_p, ctypes.c_int]
             self._lib.modbus_set_error_recovery.restype = ctypes.c_int
-        if hasattr(self._lib, "modbus_set_debug"):
-            self._lib.modbus_set_debug.argtypes = [ctypes.c_void_p, ctypes.c_int]
-            self._lib.modbus_set_debug.restype = ctypes.c_int
 
     def _preflight_serial_device(self) -> None:
         try:
@@ -695,14 +701,7 @@ class LibModbusAdapter:
             self._raise_modbus_error("new_rtu")
 
         if self._show_all_frames:
-            if hasattr(self._lib, "modbus_set_debug"):
-                if self._lib.modbus_set_debug(ctx, 1) == -1:
-                    self._raise_modbus_error("set_debug")
-            else:
-                LOGGER.warning(
-                    "modbus_show_all_frames enabled but libmodbus lacks modbus_set_debug; "
-                    "logging only decoded request frames"
-                )
+            LOGGER.info("modbus_show_all_frames enabled (python RX logging)")
 
         if self._lib.modbus_set_slave(ctx, int(slave_address)) == -1:
             self._raise_modbus_error("set_slave")
@@ -789,7 +788,7 @@ class LibModbusAdapter:
 
     def _is_recoverable_errno(self, code: int, operation: str) -> bool:
         if operation == "receive":
-            return code in _RECOVERABLE_POSIX_ERRNOS or code in _RECEIVE_RECOVERABLE_LIBMODBUS_ERRNOS
+            return code in _RECOVERABLE_POSIX_ERRNOS
         if operation == "reply":
             return code in _REPLY_RECOVERABLE_POSIX_ERRNOS or code in _REPLY_RECOVERABLE_LIBMODBUS_ERRNOS
         return False
@@ -865,24 +864,237 @@ class LibModbusAdapter:
 
         return sorted(changed.items())
 
+    def _bump_rx_stat(self, key: str, delta: int = 1) -> None:
+        if self._rx_stats is None:
+            return
+        self._rx_stats[key] = int(self._rx_stats.get(key, 0)) + int(delta)
+
+    def format_rx_stats(self) -> str:
+        if self._rx_stats is None:
+            return ""
+        order = (
+            "rx_ok",
+            "rx_crc_bad",
+            "rx_resync_bytes",
+            "rx_foreign_frames",
+            "rx_partial_timeout_drops",
+            "rx_len_reject",
+            "rx_buffer_trim",
+        )
+        return " ".join(f"{key}={int(self._rx_stats.get(key, 0))}" for key in order)
+
+    def _compact_rx_buffer(self) -> None:
+        if self._rx_head <= 0:
+            return
+        size = len(self._rx_buf)
+        if self._rx_head >= size:
+            self._rx_buf.clear()
+            self._rx_head = 0
+            return
+        if self._rx_head >= _RX_COMPACT_THRESHOLD and (self._rx_head * 2) >= size:
+            del self._rx_buf[: self._rx_head]
+            self._rx_head = 0
+
+    def _advance_rx_head(self, count: int) -> None:
+        if count <= 0:
+            return
+        size = len(self._rx_buf)
+        self._rx_head = min(size, self._rx_head + int(count))
+        self._compact_rx_buffer()
+
+    def _drop_rx_byte(self) -> None:
+        self._bump_rx_stat("rx_resync_bytes")
+        self._advance_rx_head(1)
+
+    @staticmethod
+    def _crc16_modbus(data: bytes) -> int:
+        crc = 0xFFFF
+        for byte in data:
+            crc ^= int(byte)
+            for _ in range(8):
+                if crc & 1:
+                    crc = (crc >> 1) ^ 0xA001
+                else:
+                    crc >>= 1
+        return crc & 0xFFFF
+
+    @staticmethod
+    def _u16_le(payload: bytes, offset: int) -> int:
+        if offset + 1 >= len(payload):
+            return 0
+        return (int(payload[offset + 1]) << 8) | int(payload[offset])
+
+    @staticmethod
+    def _u16_be_at(buf: bytearray, start: int, offset: int) -> int:
+        idx = int(start) + int(offset)
+        if idx + 1 >= len(buf):
+            return 0
+        return (int(buf[idx]) << 8) | int(buf[idx + 1])
+
+    def _expected_request_len(self, start: int) -> int | None:
+        available = len(self._rx_buf) - int(start)
+        if available < 2:
+            return None
+
+        fc = int(self._rx_buf[int(start) + 1])
+
+        if fc in (0x07, 0x0B, 0x0C, 0x11, 0x12):
+            return 4
+
+        if fc in (0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x08):
+            return 8
+
+        if fc in (0x0F, 0x10):
+            if available < 7:
+                return None
+            quantity = self._u16_be_at(self._rx_buf, start, 4)
+            byte_count = int(self._rx_buf[int(start) + 6])
+            if quantity <= 0 or byte_count <= 0:
+                return -1
+            expected_count = ((quantity + 7) // 8) if fc == 0x0F else (quantity * 2)
+            if byte_count != expected_count:
+                return -1
+            return 9 + byte_count
+
+        if fc == 0x16:
+            return 10
+
+        if fc == 0x17:
+            if available < 11:
+                return None
+            write_quantity = self._u16_be_at(self._rx_buf, start, 8)
+            byte_count = int(self._rx_buf[int(start) + 10])
+            if write_quantity <= 0 or byte_count <= 0 or byte_count != (write_quantity * 2):
+                return -1
+            return 13 + byte_count
+
+        # Unknown function codes are still tested as fixed-size requests first.
+        return 8
+
+    def _trim_rx_if_oversize(self) -> None:
+        available = len(self._rx_buf) - self._rx_head
+        if available <= _RX_MAX_BUFFER:
+            return
+        trim = available - _RTU_MAX_ADU_LENGTH
+        if trim <= 0:
+            return
+        self._bump_rx_stat("rx_buffer_trim")
+        self._bump_rx_stat("rx_resync_bytes", trim)
+        self._advance_rx_head(trim)
+        if self._log_rx_details:
+            LOGGER.warning("RX buffer trimmed by %d bytes (oversize backlog)", trim)
+
+    def _drop_stale_partial_frame(self, now_monotonic: float) -> None:
+        if self._rx_last_append_monotonic <= 0.0:
+            return
+        if (now_monotonic - self._rx_last_append_monotonic) < _RX_IDLE_PARTIAL_TIMEOUT_S:
+            return
+        available = len(self._rx_buf) - self._rx_head
+        if available <= 0:
+            return
+        self._bump_rx_stat("rx_partial_timeout_drops")
+        self._bump_rx_stat("rx_resync_bytes", available)
+        self._advance_rx_head(available)
+        if self._log_rx_details:
+            LOGGER.warning(
+                "Dropped stale partial RX frame (%d bytes) after %.1fms idle",
+                available,
+                _RX_IDLE_PARTIAL_TIMEOUT_S * 1000.0,
+            )
+
+    def _raise_posix_error(self, operation: str, exc: OSError) -> None:
+        code = int(getattr(exc, "errno", 0) or 0)
+        fatal = code not in _RECOVERABLE_POSIX_ERRNOS
+        message = exc.strerror or str(exc) or "posix error"
+        raise ModbusBackendError(
+            f"serial {operation} failed (errno={code}: {message})",
+            fatal=fatal,
+            operation=operation,
+            errno_code=code,
+        )
+
     def receive_request(self) -> tuple[int, bytes]:
         """Block waiting for a Modbus RTU request and return (length, bytes)."""
         if self._ctx is None:
             raise RuntimeError("libmodbus context is not initialized")
-        rc = self._lib.modbus_receive(self._ctx, self._request)
-        if rc == -1:
-            self._raise_modbus_error("receive")
-        if rc <= 0:
-            return 0, b""
-        request = bytes(self._request[:rc])
-        if self._show_all_frames:
-            LOGGER.info("Modbus RX frame len=%d bytes: %s", int(rc), request.hex(" "))
-        return int(rc), request
+        if self._fd < 0:
+            self._fd = self._socket_fd(self._ctx)
+
+        self._suppress_reply = False
+
+        while True:
+            self._compact_rx_buffer()
+            self._trim_rx_if_oversize()
+
+            while self._rx_head < len(self._rx_buf):
+                address = int(self._rx_buf[self._rx_head])
+                if 0 <= address <= 247:
+                    break
+                self._drop_rx_byte()
+
+            available = len(self._rx_buf) - self._rx_head
+            if available > 0:
+                expected_len = self._expected_request_len(self._rx_head)
+                if expected_len == -1:
+                    self._bump_rx_stat("rx_len_reject")
+                    self._drop_rx_byte()
+                    continue
+                if expected_len is not None:
+                    if expected_len < 4 or expected_len > _RTU_MAX_ADU_LENGTH:
+                        self._bump_rx_stat("rx_len_reject")
+                        self._drop_rx_byte()
+                        continue
+                    if available >= expected_len:
+                        frame = bytes(self._rx_buf[self._rx_head : self._rx_head + expected_len])
+                        recv_crc = self._u16_le(frame, expected_len - 2)
+                        calc_crc = self._crc16_modbus(frame[:-2])
+                        if recv_crc != calc_crc:
+                            self._bump_rx_stat("rx_crc_bad")
+                            self._drop_rx_byte()
+                            continue
+
+                        self._advance_rx_head(expected_len)
+                        address = int(frame[0]) if frame else -1
+                        if address not in (0, self._slave_address):
+                            self._bump_rx_stat("rx_foreign_frames")
+                            continue
+
+                        self._suppress_reply = (address == 0)
+                        for idx, byte in enumerate(frame):
+                            self._request[idx] = int(byte)
+                        self._bump_rx_stat("rx_ok")
+                        if self._show_all_frames:
+                            LOGGER.info("Modbus RX frame len=%d bytes: %s", expected_len, frame.hex(" "))
+                        return expected_len, frame
+
+            try:
+                readable, _, _ = select.select([self._fd], [], [], _RX_IDLE_PARTIAL_TIMEOUT_S)
+            except OSError as exc:
+                self._raise_posix_error("receive", exc)
+            if not readable:
+                self._drop_stale_partial_frame(time.monotonic())
+                continue
+
+            try:
+                chunk = os.read(self._fd, _RX_READ_CHUNK_MAX)
+            except OSError as exc:
+                self._raise_posix_error("receive", exc)
+            if not chunk:
+                raise ModbusBackendError(
+                    "serial receive returned EOF",
+                    fatal=True,
+                    operation="receive",
+                    errno_code=0,
+                )
+            self._rx_buf.extend(chunk)
+            self._rx_last_append_monotonic = time.monotonic()
 
     def reply(self, request_len: int) -> None:
         """Reply to the last request using current libmodbus mapping values."""
         if self._ctx is None or self._mapping is None:
             raise RuntimeError("libmodbus adapter is not initialized")
+        if self._suppress_reply:
+            return
         rc = self._lib.modbus_reply(self._ctx, self._request, int(request_len), self._mapping)
         if rc == -1:
             self._raise_modbus_error("reply")
@@ -1020,6 +1232,7 @@ class LibModbusBackend(ModbusBackend):
             self._slave_address,
             totals,
             show_all_frames=self._show_all_frames,
+            log_every_recoverable_error=self._log_every_recoverable_error,
         )
 
         initial = self._store.snapshot_tables()
@@ -1099,31 +1312,26 @@ class LibModbusBackend(ModbusBackend):
         self._recoverable_error_count += 1
         count = self._recoverable_error_count
         if self._log_every_recoverable_error:
+            rx_stats = ""
+            if self._adapter is not None:
+                rx_stats = self._adapter.format_rx_stats()
+            suffix = f" [{rx_stats}]" if rx_stats else ""
             LOGGER.warning(
-                "Recoverable Modbus %s error (%s total): %s",
+                "Recoverable Modbus %s error (%s total): %s%s",
                 exc.operation,
                 count,
                 exc,
+                suffix,
             )
             return
-        if count == 1 or count == 10 or (count % 100) == 0:
-            LOGGER.warning(
-                "Recoverable Modbus %s error (%s total): %s",
-                exc.operation,
-                count,
-                exc,
-            )
-        else:
-            LOGGER.debug("Recoverable Modbus %s error: %s", exc.operation, exc)
+        LOGGER.debug("Recoverable Modbus %s error: %s", exc.operation, exc)
 
     def _maybe_resync_after_recoverable_error(self, exc: ModbusBackendError) -> None:
-        if self._adapter is None:
-            return
-        if exc.operation != "receive":
-            return
-        if exc.errno_code is None or exc.errno_code not in _RESYNC_RECEIVE_LIBMODBUS_ERRNOS:
-            return
-        self._adapter.flush_receive_buffer(f"recoverable-{exc.operation}-errno-{exc.errno_code}")
+        # Disabled intentionally: flushing on receive-side CRC/resync errors can drop
+        # valid trailing bytes from the next frame on busy RS485 buses.
+        # if self._adapter is not None:
+        #     self._adapter.flush_receive_buffer(f"recoverable-{exc.operation}-errno-{exc.errno_code}")
+        _ = exc
 
     def _serve_loop(self) -> None:
         if self._adapter is None:
@@ -1146,7 +1354,7 @@ class LibModbusBackend(ModbusBackend):
                     break
                 if not exc.fatal:
                     self._log_recoverable_error(exc)
-                    self._maybe_resync_after_recoverable_error(exc)
+                    # self._maybe_resync_after_recoverable_error(exc)
                     continue
                 self._handle_fatal_error(exc)
                 break
