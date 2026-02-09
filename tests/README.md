@@ -147,6 +147,45 @@ Artifacts are written to:
 - `test_output/startup_history.ndjson`
 - `test_output/heartbeat.json`
 
+## Troubleshooting (App Restart Loop / rc=1)
+
+If `journalctl -fu ogm_pi.service` shows repeated:
+
+- `Starting app process ...`
+- `App exited (rc=1); restarting ...`
+
+then the child app is crashing before it can write `test_output`.
+
+On the Pi, check the deployed payload and permissions:
+
+```bash
+APP_DIR=/home/<ssh-user>/Desktop/OGM_slave_pi/runtime/apps/gui_hook_test
+ls -la "$APP_DIR"
+sudo -u ogm_pi test -f "$APP_DIR/gui_hook_test_app.py"
+sudo -u ogm_pi test -f "$APP_DIR/ipc_ndjson.py"
+sudo -u ogm_pi mkdir -p "$APP_DIR/test_output"
+sudo -u ogm_pi touch "$APP_DIR/test_output/.write_probe"
+```
+
+If write checks fail, fix ownership:
+
+```bash
+sudo chown -R ogm_pi:ogm "$APP_DIR"
+sudo chmod -R u+rwX "$APP_DIR"
+```
+
+To see the exact Python error directly as the service user:
+
+```bash
+sudo -u ogm_pi bash -lc '
+  cd /home/<ssh-user>/Desktop/OGM_slave_pi/runtime/apps/gui_hook_test &&
+  OGM_PI_SOCKET_PATH=/run/ogm_pi.sock \
+  OGM_PI_PIN_BINDINGS="[]" \
+  OGM_PI_GPIO_BINDINGS="[]" \
+  python3 gui_hook_test_app.py --once
+'
+```
+
 ## Uninstall / Cleanup
 
 1. Disable test app in config:
