@@ -34,6 +34,13 @@ logs and crash dumps are persisted under:
 - `runtime_failures.log`
 - `crash_dumps/` (timestamped dumps + `latest.log`)
 
+## Pi hook test app
+
+Deploy-loadable GUI-emulation integration tests live under `tests/`.
+
+- Setup/install/run/uninstall guide: `tests/README.md`
+- Test app payload source: `tests/slave_pi_apps/gui_hook_test`
+
 ## Installation (Pi)
 
 1) **Install system dependencies** (libmodbus runtime + libgpiod bindings):
