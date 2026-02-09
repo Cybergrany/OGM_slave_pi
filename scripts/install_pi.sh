@@ -66,6 +66,8 @@ TARGET_DIR="/opt/OGM_slave_pi"
 CONFIG_DIR="/etc/ogm_pi"
 CONFIG_FILE="${CONFIG_DIR}/ogm_pi.yaml"
 PINMAP_FILE="${CONFIG_DIR}/pinmap.json"
+SHUTDOWN_HELPER_PATH="/usr/local/sbin/ogm_pi_shutdown"
+SUDOERS_SHUTDOWN_FILE="/etc/sudoers.d/ogm_pi_shutdown"
 MODE="install"
 
 BOARD_NAME=""
@@ -455,6 +457,46 @@ ensure_group_user() {
   usermod -a -G gpio,dialout ogm_pi
 }
 
+install_shutdown_privileges() {
+  local shutdown_cmd=""
+  if command -v shutdown >/dev/null 2>&1; then
+    shutdown_cmd="$(command -v shutdown)"
+  elif [[ -x /usr/sbin/shutdown ]]; then
+    shutdown_cmd="/usr/sbin/shutdown"
+  elif [[ -x /sbin/shutdown ]]; then
+    shutdown_cmd="/sbin/shutdown"
+  fi
+
+  if [[ -z "$shutdown_cmd" ]]; then
+    echo "ERROR: shutdown command not found on this system." >&2
+    exit 1
+  fi
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "ERROR: sudo not found. Install sudo or rerun without --skip-apt." >&2
+    exit 1
+  fi
+  if ! command -v visudo >/dev/null 2>&1; then
+    echo "ERROR: visudo not found. Ensure sudo is installed correctly." >&2
+    exit 1
+  fi
+
+  cat > "$SHUTDOWN_HELPER_PATH" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec ${shutdown_cmd} now
+EOF
+  chown root:root "$SHUTDOWN_HELPER_PATH"
+  chmod 0755 "$SHUTDOWN_HELPER_PATH"
+
+  cat > "$SUDOERS_SHUTDOWN_FILE" <<EOF
+# Managed by OGM_slave_pi install_pi.sh
+ogm_pi ALL=(root) NOPASSWD: ${SHUTDOWN_HELPER_PATH}
+EOF
+  chown root:root "$SUDOERS_SHUTDOWN_FILE"
+  chmod 0440 "$SUDOERS_SHUTDOWN_FILE"
+  visudo -cf "$SUDOERS_SHUTDOWN_FILE" >/dev/null
+}
+
 backup_file() {
   local path="$1"
   if [[ -f "$path" ]]; then
@@ -710,13 +752,15 @@ stop_service_if_active() {
 uninstall_service() {
   if ! command -v systemctl >/dev/null 2>&1; then
     echo "systemctl not found; skipping service removal" >&2
-    return
+  else
+    systemctl disable --now ogm_pi.service ogm_pi.socket || true
+    rm -f /etc/systemd/system/ogm_pi.service
+    rm -f /etc/systemd/system/ogm_pi.socket
+    rm -rf /etc/systemd/system/ogm_pi.service.d
+    systemctl daemon-reload
   fi
-  systemctl disable --now ogm_pi.service ogm_pi.socket || true
-  rm -f /etc/systemd/system/ogm_pi.service
-  rm -f /etc/systemd/system/ogm_pi.socket
-  rm -rf /etc/systemd/system/ogm_pi.service.d
-  systemctl daemon-reload
+  rm -f "$SUDOERS_SHUTDOWN_FILE"
+  rm -f "$SHUTDOWN_HELPER_PATH"
 }
 
 if [[ "$MODE" == "uninstall" ]]; then
@@ -724,7 +768,7 @@ if [[ "$MODE" == "uninstall" ]]; then
   if [[ "$PURGE" == "true" ]]; then
     rm -rf "$TARGET_DIR" "$CONFIG_DIR"
   fi
-  echo "Uninstalled ogm_pi systemd units."
+  echo "Uninstalled ogm_pi systemd units and shutdown privilege helper."
   exit 0
 fi
 
@@ -745,6 +789,7 @@ if [[ "$SKIP_APT" != "true" ]]; then
   fi
   apt-get install -y \
     "$MODBUS_RUNTIME_PKG" \
+    sudo \
     python3 \
     python3-venv \
     "$GPIO_PY_PKG"
@@ -759,6 +804,7 @@ if [[ "$NO_MODBUS" != "true" ]]; then
 fi
 
 ensure_group_user
+install_shutdown_privileges
 
 stop_service_if_active
 

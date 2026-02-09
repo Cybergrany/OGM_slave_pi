@@ -21,6 +21,7 @@ traits:
   - { name: TIMED_DIGITAL,   namespaces: [master, slave, bridge_slave], coils: 1, discretes: 0, input_regs: 0, holding_regs: 2 }
 
   - { name: BOARD_RESET, namespaces: [master, slave, bridge_slave], coils: 1, discretes: 0, input_regs: 0, holding_regs: 0 }
+  - { name: BOARD_SHUTDOWN, namespaces: [master], coils: 1, discretes: 1, input_regs: 0, holding_regs: 0 }
   - { name: BOARD_STATS, namespaces: [master, slave, bridge_slave], coils: 0, discretes: 0, input_regs: 15, holding_regs: 0 }  # 6 stats + 3x two-word
   - { name: PIN_HASH, namespaces: [master, slave, bridge_slave], coils: 0, discretes: 0, input_regs: 2, holding_regs: 0 }
   - { name: BRIDGE_CORE, namespaces: [master, bridge_slave], coils: 0, discretes: 0, input_regs: 17, holding_regs: 0 }  # PIN_HASH (2) + BOARD_STATS (15)
