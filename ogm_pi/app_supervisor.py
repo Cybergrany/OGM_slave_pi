@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import threading
 import time
+from typing import IO
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -44,6 +45,47 @@ class AppSupervisor:
         self._restart_count = 0
         self._last_exit_code: Optional[int] = None
         self._last_exit_ts_ms: Optional[int] = None
+
+    def _start_output_pumps_locked(self, proc: subprocess.Popen[str]) -> None:
+        if proc.stdout is not None:
+            thread = threading.Thread(
+                target=self._pump_stream,
+                args=(proc, proc.stdout, "stdout", logging.INFO),
+                name=f"ogm_app_stdout_{proc.pid}",
+                daemon=True,
+            )
+            thread.start()
+        if proc.stderr is not None:
+            thread = threading.Thread(
+                target=self._pump_stream,
+                args=(proc, proc.stderr, "stderr", logging.WARNING),
+                name=f"ogm_app_stderr_{proc.pid}",
+                daemon=True,
+            )
+            thread.start()
+
+    def _pump_stream(
+        self,
+        proc: subprocess.Popen[str],
+        stream: IO[str],
+        stream_name: str,
+        level: int,
+    ) -> None:
+        app_name = self.config.name
+        pid = proc.pid
+        try:
+            for raw_line in iter(stream.readline, ""):
+                line = raw_line.rstrip()
+                if not line:
+                    continue
+                LOGGER.log(level, "App[%s pid=%s %s] %s", app_name, pid, stream_name, line)
+        except Exception as exc:
+            LOGGER.debug("App[%s pid=%s] log pump error on %s: %s", app_name, pid, stream_name, exc)
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
 
     @staticmethod
     def _parse_command(command: str | List[str]) -> List[str]:
@@ -142,10 +184,12 @@ class AppSupervisor:
             cwd=cwd,
             env=env,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1,
             text=True,
         )
+        self._start_output_pumps_locked(self._process)
 
     def _stop_process_locked(self, *, reason: str) -> None:
         proc = self._process

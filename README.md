@@ -260,6 +260,9 @@ sudo ./scripts/install_pi.sh --pinmap-src /path/to/pinmap.json --write-pinmap
 # Update install in place (preserve config/pinmap)
 sudo ./scripts/install_pi.sh --update
 
+# Update install and explicitly regenerate config + bundled apps
+sudo ./scripts/install_pi.sh --update --write-config --write-apps
+
 # Non-interactive install using default GPIO14/15 profile
 sudo ./scripts/install_pi.sh --default-install-config --board-name slave_pi --slave-address 99
 
@@ -279,7 +282,14 @@ sudo ./scripts/uninstall.sh
 sudo ./scripts/uninstall.sh --delete-logs
 ```
 
-`--write-config` (or any config override flag) rewrites `ogm_pi.yaml` using defaults.
+If `ogm_pi.yaml` already exists, installer preserves it by default. With config
+override flags, interactive runs now prompt before regenerating; non-interactive
+runs preserve unless `--write-config` is provided.
+If the apps dir already exists and has files, installer preserves existing app
+payloads by default and prompts on interactive runs; use `--write-apps` to force
+overwrite/sync from the bundle.
+Installer also applies shared runtime permissions so both `ogm_pi` and the invoking
+user can read/write under the install tree (including app payload output folders).
 Use `--skip-apt`/`--skip-pip` for offline installs and `--skip-systemd` to avoid
 touching systemd. If you change `--target-dir`, `--config-dir`, or `--socket-path`,
 the installer writes matching systemd units.
