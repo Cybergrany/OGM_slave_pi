@@ -62,11 +62,60 @@ app:
   env: {}
 ```
 
-Notes:
+Binding details (using `pi_pizza_right` as an example):
+
+- `pin_bindings`:
+  - pin names resolved once at app startup and injected as `OGM_PI_PIN_BINDINGS`
+    (`[{name,handle}, ...]`).
+  - use for IPC `resolve`, `get_many`, and `set_many`.
+  - can include both read and write pins, but avoid admin/safety pins unless
+    you explicitly want to exercise them.
+- `gpio_bindings`:
+  - subset of pin names that map to real GPIO lines and are injected as
+    `OGM_PI_GPIO_BINDINGS` (`[{name,handle,line}, ...]`).
+  - only app-claimed lines are allowed for IPC `gpio_read`/`gpio_write`.
+  - line claims hard-fail if the runtime already owns that line.
+
+`pi_pizza_right` safe baseline (current sample as defined in `ExternalIODefines.yaml`):
+
+```yaml
+app:
+  pin_bindings:
+    - button_lts
+    - led_outer_R
+    - led_inner_B
+    - RESET
+  gpio_bindings: []
+```
+
+Why `gpio_bindings` is empty in this baseline:
+
+- `pi_pizza_right` GPIO-numbered pins are runtime-owned by
+  `INPUT_DIGITAL`/`OUTPUT_DIGITAL` handlers, so they cannot be app-claimed.
+- `com_seg` has no concrete GPIO `pin` in the exported pinmap.
+
+If you want to explicitly test GPIO hooks (`--require-gpio`), add a dedicated
+app-owned GPIO pin to the child definition first (example):
+
+```yaml
+- { name: app_gpio_probe, type: PLAIN_COIL, pin: 18, args: [0] }
+```
+
+Then bind it:
+
+```yaml
+app:
+  pin_bindings:
+    - button_lts
+    - app_gpio_probe
+    - RESET
+  gpio_bindings:
+    - app_gpio_probe
+```
+
+General notes:
 
 - Keep `cwd: ""` to exercise daemon fallback to `<apps_dir>/<app.name>`.
-- `gpio_bindings` must reference pins that are **not** runtime-owned by
-  `INPUT_DIGITAL` / `OUTPUT_DIGITAL` handlers.
 - The board-reset test triggers `BOARD_RESET`; run during a safe maintenance
   window because outputs may briefly reset.
 
@@ -77,6 +126,13 @@ sudo systemctl restart ogm_pi.socket ogm_pi.service
 ```
 
 ## Run Tests On Pi
+
+```bash
+cd /home/<ssh-user>/Desktop/OGM_slave_pi/runtime/apps/gui_hook_test
+python3 run_gui_hook_test.py --socket-path /run/ogm_pi.sock
+```
+
+If you configured `gpio_bindings` (for example `app_gpio_probe` above), run:
 
 ```bash
 cd /home/<ssh-user>/Desktop/OGM_slave_pi/runtime/apps/gui_hook_test
