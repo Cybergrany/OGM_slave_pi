@@ -52,6 +52,7 @@ Install behavior:
   --skip-pip                Skip pip installs
   --skip-systemd            Do not enable/start systemd units
   --write-config            Force overwrite of ogm_pi.yaml (backs up existing)
+  --write-apps              Force overwrite/sync of existing apps dir content
   --write-pinmap            Force overwrite of pinmap.json (backs up existing)
 
 USAGE
@@ -102,6 +103,7 @@ SKIP_PIP="false"
 SKIP_SYSTEMD="false"
 RSYNC_DELETE="false"
 WRITE_CONFIG="false"
+WRITE_APPS="false"
 WRITE_PINMAP="false"
 PURGE="false"
 
@@ -162,6 +164,7 @@ while [[ $# -gt 0 ]]; do
     --skip-pip) SKIP_PIP="true"; shift ;;
     --skip-systemd) SKIP_SYSTEMD="true"; shift ;;
     --write-config) WRITE_CONFIG="true"; shift ;;
+    --write-apps) WRITE_APPS="true"; shift ;;
     --write-pinmap) WRITE_PINMAP="true"; shift ;;
 
     -h|--help) usage; exit 0 ;;
@@ -462,6 +465,9 @@ ensure_group_user() {
     useradd -r -g ogm -d /nonexistent -s /usr/sbin/nologin ogm_pi
   fi
   usermod -a -G gpio,dialout ogm_pi
+  if [[ -n "$CONFIG_ACCESS_USER" ]]; then
+    usermod -a -G ogm "$CONFIG_ACCESS_USER" >/dev/null 2>&1 || true
+  fi
 }
 
 install_shutdown_privileges() {
@@ -509,6 +515,80 @@ backup_file() {
   if [[ -f "$path" ]]; then
     cp "$path" "${path}.bak.$(date +%Y%m%d%H%M%S)"
   fi
+}
+
+prompt_yes_no() {
+  local question="$1"
+  local default="$2"
+  local suffix reply
+  case "$default" in
+    yes) suffix="[Y/n]" ;;
+    no) suffix="[y/N]" ;;
+    *)
+      echo "prompt_yes_no default must be 'yes' or 'no'" >&2
+      return 1
+      ;;
+  esac
+
+  while true; do
+    read -r -p "${question} ${suffix}: " reply
+    case "${reply,,}" in
+      "")
+        [[ "$default" == "yes" ]]
+        return
+        ;;
+      y|yes) return 0 ;;
+      n|no) return 1 ;;
+      *) echo "Please enter y or n." ;;
+    esac
+  done
+}
+
+dir_has_contents() {
+  local path="$1"
+  [[ -d "$path" ]] || return 1
+  find "$path" -mindepth 1 -maxdepth 1 -print -quit | grep -q .
+}
+
+should_write_config() {
+  local file="$1"
+  if [[ ! -f "$file" ]]; then
+    return 0
+  fi
+  if [[ "$WRITE_CONFIG" == "true" ]]; then
+    return 0
+  fi
+  if [[ "$CONFIG_OVERRIDES" != "true" ]]; then
+    echo "Config exists at ${file}; preserving existing file."
+    return 1
+  fi
+  if [[ -t 0 ]]; then
+    if prompt_yes_no "Config exists at ${file}. Generate a new version from installer values?" "no"; then
+      return 0
+    fi
+    echo "Keeping existing config at ${file}; override flags were not applied."
+    return 1
+  fi
+  echo "Config exists at ${file}; preserving existing file (non-interactive). Use --write-config to overwrite."
+  return 1
+}
+
+should_preserve_existing_apps_dir() {
+  local dir="$1"
+  if [[ "$WRITE_APPS" == "true" ]]; then
+    return 1
+  fi
+  if ! dir_has_contents "$dir"; then
+    return 1
+  fi
+  if [[ -t 0 ]]; then
+    if prompt_yes_no "Apps dir ${dir} contains files. Preserve existing app payloads?" "yes"; then
+      return 0
+    fi
+    return 1
+  fi
+  echo "Apps dir ${dir} contains files; preserving existing payloads (non-interactive). Use --write-apps to overwrite."
+  return 0
 }
 
 escape_sed() {
@@ -604,6 +684,27 @@ grant_config_access_for_user() {
   grant_user_path_access "$user" "$CONFIG_DIR" "rwx"
   grant_user_path_access "$user" "$CONFIG_FILE" "rw"
   grant_user_path_access "$user" "$PINMAP_FILE" "rw"
+}
+
+apply_shared_runtime_permissions() {
+  local path="$1"
+  local user="$2"
+  [[ -d "$path" ]] || return
+
+  chgrp -R ogm "$path" >/dev/null 2>&1 || true
+  chmod -R g+rwX "$path" >/dev/null 2>&1 || true
+  find "$path" -type d -exec chmod g+s {} + >/dev/null 2>&1 || true
+
+  if command -v setfacl >/dev/null 2>&1; then
+    setfacl -R -m u:ogm_pi:rwX "$path" >/dev/null 2>&1 || true
+    find "$path" -type d -exec setfacl -m d:u:ogm_pi:rwX {} + >/dev/null 2>&1 || true
+    if [[ -n "$user" ]]; then
+      setfacl -R -m "u:${user}:rwX" "$path" >/dev/null 2>&1 || true
+      find "$path" -type d -exec setfacl -m "d:u:${user}:rwX" {} + >/dev/null 2>&1 || true
+    fi
+  elif [[ -n "$user" ]]; then
+    usermod -a -G ogm "$user" >/dev/null 2>&1 || true
+  fi
 }
 
 grant_dir_traverse() {
@@ -808,6 +909,7 @@ if [[ "$SKIP_APT" != "true" ]]; then
     exit 1
   fi
   apt-get install -y \
+    acl \
     "$MODBUS_RUNTIME_PKG" \
     sudo \
     python3 \
@@ -829,17 +931,37 @@ install_shutdown_privileges
 stop_service_if_active
 
 mkdir -p "$TARGET_DIR"
-if command -v rsync >/dev/null 2>&1; then
-  if [[ "$RSYNC_DELETE" == "true" ]]; then
-    rsync -a --delete --exclude '.git' "$ROOT_DIR/" "$TARGET_DIR/"
-  else
-    rsync -a --exclude '.git' "$ROOT_DIR/" "$TARGET_DIR/"
+
+APPS_REL_UNDER_TARGET=""
+if [[ "$APPS_DIR" == "$TARGET_DIR"/* ]]; then
+  APPS_REL_UNDER_TARGET="${APPS_DIR#"$TARGET_DIR"/}"
+fi
+PRESERVE_EXISTING_APPS="false"
+if [[ -n "$APPS_REL_UNDER_TARGET" && -d "$APPS_DIR" ]]; then
+  if should_preserve_existing_apps_dir "$APPS_DIR"; then
+    PRESERVE_EXISTING_APPS="true"
   fi
+fi
+
+if command -v rsync >/dev/null 2>&1; then
+  rsync_args=(rsync -a --exclude '.git')
+  if [[ "$PRESERVE_EXISTING_APPS" == "true" ]]; then
+    rsync_args+=(--exclude "${APPS_REL_UNDER_TARGET}/")
+  fi
+  if [[ "$RSYNC_DELETE" == "true" ]]; then
+    rsync_args+=(--delete)
+  fi
+  rsync_args+=("$ROOT_DIR/" "$TARGET_DIR/")
+  "${rsync_args[@]}"
 else
   if [[ "$RSYNC_DELETE" == "true" ]]; then
     echo "Warning: rsync not found; --delete ignored" >&2
   fi
-  cp -a "$ROOT_DIR/." "$TARGET_DIR/"
+  if [[ "$PRESERVE_EXISTING_APPS" == "true" ]]; then
+    tar -C "$ROOT_DIR" --exclude '.git' --exclude "$APPS_REL_UNDER_TARGET" -cf - . | tar -C "$TARGET_DIR" -xf -
+  else
+    cp -a "$ROOT_DIR/." "$TARGET_DIR/"
+  fi
 fi
 mkdir -p "$CUSTOM_TYPES_DIR"
 mkdir -p "$APPS_DIR"
@@ -856,9 +978,11 @@ mkdir -p "$CONFIG_DIR"
 chown root:ogm "$CONFIG_DIR"
 chmod 0770 "$CONFIG_DIR"
 
-if [[ "$WRITE_CONFIG" == "true" || ! -f "$CONFIG_FILE" || "$CONFIG_OVERRIDES" == "true" ]]; then
+CONFIG_REGENERATED="false"
+if should_write_config "$CONFIG_FILE"; then
   backup_file "$CONFIG_FILE"
   write_config
+  CONFIG_REGENERATED="true"
 fi
 
 if [[ "$WRITE_PINMAP" == "true" || "$PINMAP_REQUESTED" == "true" ]]; then
@@ -877,6 +1001,13 @@ if [[ -d "$CUSTOM_TYPES_DIR" ]]; then
 fi
 if [[ -d "$APPS_DIR" ]]; then
   chown -R ogm_pi:ogm "$APPS_DIR"
+fi
+apply_shared_runtime_permissions "$TARGET_DIR" "$CONFIG_ACCESS_USER"
+if [[ "$CUSTOM_TYPES_DIR" != "$TARGET_DIR" && -d "$CUSTOM_TYPES_DIR" ]]; then
+  apply_shared_runtime_permissions "$CUSTOM_TYPES_DIR" "$CONFIG_ACCESS_USER"
+fi
+if [[ "$APPS_DIR" != "$TARGET_DIR" && -d "$APPS_DIR" ]]; then
+  apply_shared_runtime_permissions "$APPS_DIR" "$CONFIG_ACCESS_USER"
 fi
 if [[ -f "$CONFIG_FILE" ]]; then
   chown ogm_pi:ogm "$CONFIG_FILE"
@@ -900,6 +1031,16 @@ systemd_reload_restart
 echo "Installed OGM_slave_pi to ${TARGET_DIR}"
 echo "Config: ${CONFIG_FILE}"
 echo "Pinmap: ${PINMAP_FILE}"
+if [[ "$CONFIG_REGENERATED" == "true" ]]; then
+  echo "Config action: regenerated"
+else
+  echo "Config action: preserved existing"
+fi
+if [[ "$PRESERVE_EXISTING_APPS" == "true" ]]; then
+  echo "Apps action: preserved existing content in ${APPS_DIR}"
+else
+  echo "Apps action: synced bundled content into ${APPS_DIR}"
+fi
 if [[ "$UART_REBOOT_REQUIRED" == "true" ]]; then
   echo "UART updates were applied. Reboot before using Modbus on ${SERIAL}."
   echo "After reboot: sudo systemctl restart ogm_pi.socket ogm_pi.service"
