@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import json
 import logging
 import os
 import signal
@@ -18,11 +19,14 @@ from pathlib import Path
 
 import yaml
 
+from .app_supervisor import AppConfig, AppSupervisor
+from .gpio_claims import GpioClaimError, GpioClaimRegistry
 from .ipc_server import IPCServer
 from .gpio import LibgpiodAdapter, NullGpioAdapter
 from .modbus_server import create_backend
 from .pinmap import PinMap
 from .pin_runtime import PinRuntime
+from .pin_resolver import PinResolver
 from .store import RegisterStore
 
 LOGGER = logging.getLogger(__name__)
@@ -32,6 +36,7 @@ DEFAULT_CONFIG_PATH = "/etc/ogm_pi/ogm_pi.yaml"
 DEFAULT_SETTINGS = {
     "pinmap": None,
     "custom_types_dir": None,
+    "apps_dir": "/opt/OGM_slave_pi/apps",
     "serial": "/dev/ttyUSB0",
     "baud": 250000,
     "parity": "N",
@@ -50,6 +55,7 @@ DEFAULT_SETTINGS = {
     "modbus_fail_open": False,
     "modbus_log_every_failure": False,
     "modbus_show_all_frames": False,
+    "app": None,
 }
 
 
@@ -63,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="Path to daemon config YAML")
     parser.add_argument("--pinmap", help="Path to exported pinmap JSON")
     parser.add_argument("--custom-types-dir", help="Path to custom pin handler modules")
+    parser.add_argument("--apps-dir", help="Default child app payload root directory")
     parser.add_argument("--serial", help="Serial device for Modbus RTU")
     parser.add_argument("--baud", type=int, help="Modbus RTU baud rate")
     parser.add_argument("--parity", help="Serial parity (N/E/O)")
@@ -314,6 +321,96 @@ def configure_logging(level: str, *, failure_log: str | None = None) -> None:
             root.warning("Could not open failure log at %s: %s", failure_log, exc)
 
 
+def build_app_supervisor(
+    settings: dict,
+    *,
+    pinmap: PinMap,
+    resolver: PinResolver,
+    gpio_claims: GpioClaimRegistry,
+    socket_path: str,
+    apps_dir: str,
+) -> tuple[Optional[AppSupervisor], Optional[dict[str, object]]]:
+    """Build and validate optional child-app supervision config."""
+    raw = settings.get("app")
+    if raw in (None, "", False):
+        return None, None
+    if not isinstance(raw, dict):
+        raise ValueError("app config must be a mapping")
+
+    enabled = as_bool(raw.get("enabled", False), default=False)
+    if not enabled:
+        return None, None
+
+    name = str(raw.get("name") or "default").strip() or "default"
+    owner = f"app:{name}"
+    command = raw.get("command")
+    if not command:
+        raise ValueError("app.enabled=true requires app.command")
+
+    raw_env = raw.get("env") or {}
+    if not isinstance(raw_env, dict):
+        raise ValueError("app.env must be a mapping")
+    app_env = {str(key): str(value) for key, value in raw_env.items()}
+
+    raw_pin_bindings = raw.get("pin_bindings") or []
+    if not isinstance(raw_pin_bindings, list):
+        raise ValueError("app.pin_bindings must be a list")
+    pin_infos = resolver.resolve_names(raw_pin_bindings)
+
+    raw_gpio_bindings = raw.get("gpio_bindings") or []
+    if not isinstance(raw_gpio_bindings, list):
+        raise ValueError("app.gpio_bindings must be a list")
+    gpio_handles: list[dict[str, object]] = []
+    for raw_name in raw_gpio_bindings:
+        pin_name = str(raw_name)
+        handle = resolver.handle_for_name(pin_name)
+        line = resolver.gpio_line_for_handle(handle)
+        if line is None:
+            raise ValueError(f"GPIO binding pin '{pin_name}' does not map to a concrete GPIO line")
+        gpio_claims.claim_line(owner, line)
+        gpio_handles.append({"name": pin_name, "handle": handle, "line": line})
+
+    extra_env = {
+        "OGM_PI_SOCKET_PATH": socket_path,
+        "OGM_PI_APPS_DIR": str(apps_dir),
+        "OGM_PI_PINMAP_HASH": str(pinmap.hash),
+        "OGM_PI_BOARD_ID": str(pinmap.raw.get("id", "")),
+        "OGM_PI_BOARD_NAME": str(pinmap.raw.get("label", "")),
+        "OGM_PI_PIN_BINDINGS": json.dumps(
+            [{"name": info.name, "handle": info.handle} for info in pin_infos],
+            separators=(",", ":"),
+        ),
+        "OGM_PI_GPIO_BINDINGS": json.dumps(gpio_handles, separators=(",", ":")),
+    }
+
+    raw_cwd = str(raw.get("cwd") or "").strip()
+    resolved_cwd = raw_cwd
+    if not resolved_cwd and apps_dir:
+        resolved_cwd = str(Path(apps_dir) / name)
+
+    cfg = AppConfig(
+        enabled=True,
+        name=name,
+        command=str(command),
+        cwd=resolved_cwd,
+        restart_policy=str(raw.get("restart_policy", "always") or "always"),
+        restart_backoff_ms=max(int(raw.get("restart_backoff_ms", 2000)), 0),
+        startup_timeout_ms=max(int(raw.get("startup_timeout_ms", 10000)), 0),
+        shutdown_timeout_ms=max(int(raw.get("shutdown_timeout_ms", 5000)), 0),
+        env=app_env,
+    )
+    supervisor = AppSupervisor(cfg, extra_env=extra_env)
+    meta = {
+        "name": name,
+        "owner": owner,
+        "apps_dir": str(apps_dir),
+        "cwd": resolved_cwd,
+        "pin_bindings": [{"name": info.name, "handle": info.handle} for info in pin_infos],
+        "gpio_bindings": gpio_handles,
+    }
+    return supervisor, meta
+
+
 def main() -> int:
     """CLI entry point for running the daemon."""
     args = parse_args()
@@ -361,13 +458,13 @@ def main() -> int:
     pinmap = PinMap.load(str(settings["pinmap"]))
     store = RegisterStore(pinmap.totals)
     store.seed_pin_hash(pinmap)
+    resolver = PinResolver(pinmap)
+    gpio_claims = GpioClaimRegistry()
 
     custom_types_dir = settings.get("custom_types_dir")
     if custom_types_dir in (None, ""):
         default_custom_dir = Path(__file__).resolve().parents[1] / "custom_types"
         custom_types_dir = str(default_custom_dir) if default_custom_dir.exists() else None
-
-    server = IPCServer(store, pinmap, str(settings["socket_path"]))
 
     if settings.get("no_gpio"):
         gpio = NullGpioAdapter()
@@ -378,6 +475,15 @@ def main() -> int:
             LOGGER.warning("GPIO init failed (%s); running with NullGpioAdapter", exc)
             gpio = NullGpioAdapter()
 
+    server = IPCServer(
+        store,
+        pinmap,
+        str(settings["socket_path"]),
+        resolver=resolver,
+        gpio=gpio,
+        gpio_claims=gpio_claims,
+    )
+
     runtime = PinRuntime(
         pinmap,
         store,
@@ -385,8 +491,35 @@ def main() -> int:
         poll_interval=max(int(settings.get("pin_poll_ms", 20)), 1) / 1000.0,
         stats_interval=max(float(settings.get("stats_interval", 5.0)), 0.5),
         custom_types_dir=custom_types_dir,
+        gpio_claims=gpio_claims,
+        event_sink=server.publish_events,
     )
-    runtime.start()
+
+    app_supervisor: Optional[AppSupervisor] = None
+    app_meta: Optional[dict[str, object]] = None
+    try:
+        app_supervisor, app_meta = build_app_supervisor(
+            settings,
+            pinmap=pinmap,
+            resolver=resolver,
+            gpio_claims=gpio_claims,
+            socket_path=str(settings["socket_path"]),
+            apps_dir=str(settings.get("apps_dir") or ""),
+        )
+    except GpioClaimError as exc:
+        raise SystemExit(f"ogm_pi: app GPIO claim failed: {exc}") from exc
+    except Exception as exc:
+        raise SystemExit(f"ogm_pi: invalid app config: {exc}") from exc
+
+    if app_supervisor is not None:
+        server.set_app_reload_handler(app_supervisor.reload)
+        LOGGER.info(
+            "App supervision enabled (%s): cwd=%s, %s pin bindings, %s gpio bindings",
+            app_meta.get("name", "default") if isinstance(app_meta, dict) else "default",
+            app_meta.get("cwd", "") if isinstance(app_meta, dict) else "",
+            len(app_meta.get("pin_bindings", [])) if isinstance(app_meta, dict) else 0,
+            len(app_meta.get("gpio_bindings", [])) if isinstance(app_meta, dict) else 0,
+        )
 
     slave_address = settings.get("slave_address")
     if slave_address is None:
@@ -445,6 +578,21 @@ def main() -> int:
     # Modbus startup blocks on serial/device state.
     ipc_thread = threading.Thread(target=server.serve_forever, name="ogm_ipc", daemon=True)
     ipc_thread.start()
+    time.sleep(0.1)
+    ipc_startup_error = server.consume_startup_error()
+    if ipc_startup_error is not None or not ipc_thread.is_alive():
+        exc = RuntimeError(f"IPC server failed to start: {ipc_startup_error or 'thread exited during startup'}")
+        write_crash_dump(
+            crash_dump_dir,
+            reason="ipc_startup_error",
+            exc=exc,
+            details={"socket_path": str(settings["socket_path"])},
+        )
+        raise exc
+
+    runtime.start()
+    if app_supervisor is not None:
+        app_supervisor.start()
 
     shutdown_once = threading.Event()
 
@@ -458,6 +606,8 @@ def main() -> int:
         server.stop()
         if ipc_thread.is_alive():
             ipc_thread.join(timeout=1.0)
+        if app_supervisor is not None:
+            app_supervisor.stop()
         runtime.stop()
         backend.stop()
         gpio.close()
@@ -516,13 +666,26 @@ def main() -> int:
         raise backend_start_error[0]
 
     try:
+        ipc_restart_attempts = 0
         while not fatal_event.is_set():
             if not ipc_thread.is_alive():
-                LOGGER.error("IPC server thread exited unexpectedly; restarting it.")
+                ipc_error = server.consume_startup_error()
+                if ipc_error is not None:
+                    raise RuntimeError(f"IPC server exited with startup error: {ipc_error}")
+                ipc_restart_attempts += 1
+                if ipc_restart_attempts > 5:
+                    raise RuntimeError("IPC server thread exited repeatedly")
+                LOGGER.error("IPC server thread exited unexpectedly; restarting it (%s/5).", ipc_restart_attempts)
                 ipc_thread = threading.Thread(target=server.serve_forever, name="ogm_ipc", daemon=True)
                 ipc_thread.start()
-                time.sleep(0.25)
+                time.sleep(0.2)
+                ipc_error = server.consume_startup_error()
+                if ipc_error is not None or not ipc_thread.is_alive():
+                    raise RuntimeError(
+                        f"IPC server restart failed: {ipc_error or 'thread exited during restart'}"
+                    )
                 continue
+            ipc_restart_attempts = 0
             time.sleep(0.25)
     except Exception as exc:
         write_crash_dump(

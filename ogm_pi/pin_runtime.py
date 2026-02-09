@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import logging
 import subprocess
 import threading
 import time
 
 from .custom_loader import load_custom_handlers
+from .gpio_claims import GpioClaimError, GpioClaimRegistry
 from .gpio import GpioAdapter, NullGpioAdapter
 from .pinmap import PinMap, PinRecord, RegSpan
 from .store import RegisterStore, crc16_modbus_words
@@ -184,6 +185,10 @@ class PinHandler:
         """Force a safe output state if applicable."""
         return
 
+    def claimed_lines(self) -> List[int]:
+        """Return GPIO lines this handler owns, if any."""
+        return []
+
 
 class PlainCoil(PinHandler):
     def __init__(self, pin: PinRecord, store: RegisterStore, runtime: "PinRuntime") -> None:
@@ -323,6 +328,11 @@ class InputDigital(PinHandler):
     def reset(self) -> None:
         self.update(time.monotonic())
 
+    def claimed_lines(self) -> List[int]:
+        if self._line is None:
+            return []
+        return [self._line]
+
 
 class OutputDigital(PinHandler):
     def __init__(self, pin: PinRecord, store: RegisterStore, runtime: "PinRuntime") -> None:
@@ -360,6 +370,11 @@ class OutputDigital(PinHandler):
         safe_val = bool(self.coil.initial)
         self._last = safe_val
         self.runtime.gpio.write(self._line, safe_val)
+
+    def claimed_lines(self) -> List[int]:
+        if self._line is None:
+            return []
+        return [self._line]
 
 
 class OutputDigitalAutoRelease(PinHandler):
@@ -421,6 +436,11 @@ class OutputDigitalAutoRelease(PinHandler):
         self.coil.set(0)
         self._last = False
         self.runtime.gpio.write(self._line, False)
+
+    def claimed_lines(self) -> List[int]:
+        if self._line is None:
+            return []
+        return [self._line]
 
 
 class BoardReset(PinHandler):
@@ -565,10 +585,14 @@ class PinRuntime:
         poll_interval: float = 0.02,
         stats_interval: float = 5.0,
         custom_types_dir: Optional[str] = None,
+        gpio_claims: Optional[GpioClaimRegistry] = None,
+        event_sink: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ) -> None:
         self.pinmap = pinmap
         self.store = store
         self.gpio = gpio or NullGpioAdapter()
+        self._gpio_claims = gpio_claims
+        self._event_sink = event_sink
         self._poll_interval = poll_interval
         self._stats_interval = stats_interval
         self._handlers: List[PinHandler] = []
@@ -579,6 +603,8 @@ class PinRuntime:
         self._start_time = time.monotonic()
         self._last_reset_time = self._start_time
         self._reset_lock = threading.Lock()
+        self._event_seq = 0
+        self._reset_generation = 0
         custom_handlers, custom_metrics = load_custom_handlers(
             custom_types_dir,
             built_in_handlers=self._handler_types.keys(),
@@ -591,6 +617,7 @@ class PinRuntime:
             LOGGER.info("Loaded %s custom metric pin binding(s)", len(custom_metrics))
             self._metric_input_regs.update(custom_metrics)
         self._build_handlers()
+        self._claim_handler_lines()
 
     def _build_handlers(self) -> None:
         for pin in self.pinmap.pins:
@@ -609,6 +636,18 @@ class PinRuntime:
             else:
                 handler = handler_cls(pin, self.store, self)
             self._handlers.append(handler)
+
+    def _claim_handler_lines(self) -> None:
+        """Claim GPIO lines used by built-in handlers up front."""
+        if self._gpio_claims is None:
+            return
+        for handler in self._handlers:
+            for line in handler.claimed_lines():
+                owner = f"pin:{handler.pin.name}"
+                try:
+                    self._gpio_claims.claim_line(owner, line)
+                except GpioClaimError as exc:
+                    raise RuntimeError(f"GPIO claim collision for {owner} on line {line}: {exc}") from exc
 
     def force_safe_outputs(self, reason: str = "") -> None:
         """Force all output pins to their safe state."""
@@ -639,11 +678,25 @@ class PinRuntime:
         try:
             LOGGER.info("Board reset triggered (%s)", reason or "manual")
             self._last_reset_time = time.monotonic()
+            self._reset_generation += 1
             for handler in self._handlers:
                 handler.reset()
             self.store.seed_pin_hash(self.pinmap)
+            self._emit_event(
+                "board_reset",
+                {
+                    "source": "runtime",
+                    "reason": reason or "manual",
+                    "reset_generation": self._reset_generation,
+                    "ts_ms": int(time.time() * 1000),
+                },
+            )
         finally:
             self._reset_lock.release()
+
+    @property
+    def reset_generation(self) -> int:
+        return int(self._reset_generation)
 
     def uptime_ms(self) -> int:
         return int((time.monotonic() - self._start_time) * 1000)
@@ -663,3 +716,11 @@ class PinRuntime:
             sleep_for = self._poll_interval - elapsed
             if sleep_for > 0:
                 time.sleep(sleep_for)
+
+    def _emit_event(self, event: str, payload: Dict[str, Any]) -> None:
+        if self._event_sink is None:
+            return
+        self._event_seq += 1
+        out = {"event": event, "seq": self._event_seq}
+        out.update(payload)
+        self._event_sink([out])

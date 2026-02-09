@@ -32,6 +32,7 @@ def parse_args() -> argparse.Namespace:
 
     sub.add_parser("list", help="List available pins")
     sub.add_parser("schema", help="Return the full pinmap JSON")
+    sub.add_parser("app-reload", help="Reload the configured child app process")
 
     get_cmd = sub.add_parser("get", help="Get register values for a pin")
     get_cmd.add_argument("name", help="Pin name")
@@ -41,6 +42,12 @@ def parse_args() -> argparse.Namespace:
     set_cmd.add_argument("--type", required=True, choices=["coils", "discretes", "input_regs", "holding_regs"], help="Register table")
     set_cmd.add_argument("--value", help="Single value (for count=1)")
     set_cmd.add_argument("--values", help="Comma-separated list for multi-register pins")
+
+    resolve_cmd = sub.add_parser("resolve", help="Resolve one or more pin names into integer handles")
+    resolve_cmd.add_argument("names", nargs="+", help="Pin names")
+
+    get_many_cmd = sub.add_parser("get-many", help="Read pin values by handles")
+    get_many_cmd.add_argument("handles", nargs="+", help="Integer handles")
 
     return parser.parse_args()
 
@@ -77,6 +84,14 @@ def main() -> None:
     elif args.cmd == "set":
         request["name"] = args.name
         request["values"] = {args.type: parse_values(args.value, args.values)}
+    elif args.cmd == "resolve":
+        request["cmd"] = "resolve"
+        request["names"] = list(args.names)
+    elif args.cmd == "get-many":
+        request["cmd"] = "get_many"
+        request["handles"] = [int(h, 0) for h in args.handles]
+    elif args.cmd == "app-reload":
+        request["cmd"] = "app_reload"
 
     response = send_request(request, args.socket)
     print(json.dumps(response, indent=2))

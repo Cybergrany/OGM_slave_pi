@@ -13,7 +13,21 @@ gpio_chip: /dev/gpiochip0
 pin_poll_ms: 20
 stats_interval: 5.0
 log_level: INFO
+apps_dir: /opt/OGM_slave_pi/apps
 # Set true to log every recoverable Modbus failure.
 modbus_log_every_failure: false
 # Set true to log every received Modbus request frame (very verbose).
 modbus_show_all_frames: false
+# Optional child GUI/app process (supervised by ogm_pi).
+app:
+  enabled: false
+  name: default
+  command: ""
+  cwd: /opt/OGM_slave_pi/apps/default
+  restart_policy: always
+  restart_backoff_ms: 2000
+  startup_timeout_ms: 10000
+  shutdown_timeout_ms: 5000
+  pin_bindings: []
+  gpio_bindings: []
+  env: {}

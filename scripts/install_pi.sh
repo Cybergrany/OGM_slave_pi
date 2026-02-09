@@ -29,6 +29,7 @@ Config overrides:
   --slave-address ADDR      Override Modbus slave address
   --socket-path PATH        IPC socket path (default: /run/ogm_pi.sock)
   --custom-types-dir PATH   Custom pin handler dir (default: <target-dir>/custom_types)
+  --apps-dir PATH           Child app payload dir (default: <target-dir>/apps)
   --gpio-chip PATH          GPIO chip path (default: /dev/gpiochip0)
   --default-install-config  Use default GPIO14/15 RS485 config (serial0 + uart-fix)
   --no-default-install-config
@@ -87,6 +88,7 @@ SLAVE_ADDRESS=""
 SOCKET_PATH="/run/ogm_pi.sock"
 GPIO_CHIP="/dev/gpiochip0"
 CUSTOM_TYPES_DIR=""
+APPS_DIR=""
 NO_MODBUS="false"
 NO_GPIO="false"
 PIN_POLL_MS="20"
@@ -106,6 +108,7 @@ PURGE="false"
 CONFIG_OVERRIDES="false"
 PINMAP_REQUESTED="false"
 CUSTOM_TYPES_OVERRIDE="false"
+APPS_DIR_OVERRIDE="false"
 SERIAL_SET="false"
 BAUD_SET="false"
 PARITY_SET="false"
@@ -138,6 +141,7 @@ while [[ $# -gt 0 ]]; do
     --slave-address) SLAVE_ADDRESS="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
     --socket-path) SOCKET_PATH="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
     --custom-types-dir) CUSTOM_TYPES_DIR="$2"; CUSTOM_TYPES_OVERRIDE="true"; CONFIG_OVERRIDES="true"; shift 2 ;;
+    --apps-dir) APPS_DIR="$2"; APPS_DIR_OVERRIDE="true"; CONFIG_OVERRIDES="true"; shift 2 ;;
     --gpio-chip) GPIO_CHIP="$2"; CONFIG_OVERRIDES="true"; shift 2 ;;
     --default-install-config) DEFAULT_INSTALL_CONFIG="yes"; shift ;;
     --no-default-install-config) DEFAULT_INSTALL_CONFIG="no"; shift ;;
@@ -189,6 +193,9 @@ CONFIG_FILE="${CONFIG_DIR}/ogm_pi.yaml"
 PINMAP_FILE="${CONFIG_DIR}/pinmap.json"
 if [[ "$CUSTOM_TYPES_OVERRIDE" != "true" ]]; then
   CUSTOM_TYPES_DIR="${TARGET_DIR}/custom_types"
+fi
+if [[ "$APPS_DIR_OVERRIDE" != "true" ]]; then
+  APPS_DIR="${TARGET_DIR}/apps"
 fi
 if [[ -n "${OGM_CONFIG_USER:-}" ]]; then
   CONFIG_ACCESS_USER="${OGM_CONFIG_USER}"
@@ -549,6 +556,7 @@ stop_bits: ${STOP_BITS}
 slave_address: ${slave_line}
 socket_path: ${SOCKET_PATH}
 custom_types_dir: ${CUSTOM_TYPES_DIR}
+apps_dir: ${APPS_DIR}
 no_modbus: ${NO_MODBUS}
 no_gpio: ${NO_GPIO}
 gpio_chip: ${GPIO_CHIP}
@@ -559,6 +567,18 @@ failure_log: ${TARGET_DIR}/runtime_failures.log
 crash_dump_dir: ${TARGET_DIR}/crash_dumps
 modbus_log_every_failure: false
 modbus_show_all_frames: false
+app:
+  enabled: false
+  name: default
+  command: ""
+  cwd: ${APPS_DIR}/default
+  restart_policy: always
+  restart_backoff_ms: 2000
+  startup_timeout_ms: 10000
+  shutdown_timeout_ms: 5000
+  pin_bindings: []
+  gpio_bindings: []
+  env: {}
 EOF
 }
 
@@ -822,6 +842,7 @@ else
   cp -a "$ROOT_DIR/." "$TARGET_DIR/"
 fi
 mkdir -p "$CUSTOM_TYPES_DIR"
+mkdir -p "$APPS_DIR"
 
 if [[ "$SKIP_PIP" != "true" ]]; then
   if [[ ! -d "${TARGET_DIR}/.venv" ]]; then
@@ -853,6 +874,9 @@ chown ogm_pi:ogm "${TARGET_DIR}/runtime_failures.log"
 chmod 0644 "${TARGET_DIR}/runtime_failures.log"
 if [[ -d "$CUSTOM_TYPES_DIR" ]]; then
   chown -R ogm_pi:ogm "$CUSTOM_TYPES_DIR"
+fi
+if [[ -d "$APPS_DIR" ]]; then
+  chown -R ogm_pi:ogm "$APPS_DIR"
 fi
 if [[ -f "$CONFIG_FILE" ]]; then
   chown ogm_pi:ogm "$CONFIG_FILE"
