@@ -14,7 +14,7 @@ class GpioAdapter:
     def setup_input(self, line: int, pull_up: bool = True) -> None:
         raise NotImplementedError
 
-    def setup_output(self, line: int, initial: bool = False) -> None:
+    def setup_output(self, line: int, initial: bool = False, open_drain: bool = False) -> bool:
         raise NotImplementedError
 
     def read(self, line: int) -> int:
@@ -36,15 +36,15 @@ class NullGpioAdapter(GpioAdapter):
     def setup_input(self, line: int, pull_up: bool = True) -> None:
         self._values.setdefault(line, 1 if pull_up else 0)
 
-    def setup_output(self, line: int, initial: bool = False) -> None:
+    def setup_output(self, line: int, initial: bool = False, open_drain: bool = False) -> bool:
         self._values[line] = 1 if initial else 0
+        return bool(open_drain)
 
     def read(self, line: int) -> int:
         return int(self._values.get(line, 0))
 
     def write(self, line: int, value: bool) -> None:
         self._values[line] = 1 if value else 0
-
 
 class LibgpiodAdapter(GpioAdapter):
     """libgpiod-backed GPIO adapter (supports v1/v2 APIs)."""
@@ -73,6 +73,7 @@ class LibgpiodAdapter(GpioAdapter):
             self._Direction = getattr(self._gpiod, "LineDirection", None) or getattr(line_mod, "Direction", None)
             self._Bias = getattr(self._gpiod, "LineBias", None) or getattr(line_mod, "Bias", None)
             self._Value = getattr(self._gpiod, "LineValue", None) or getattr(line_mod, "Value", None)
+            self._Drive = getattr(self._gpiod, "LineDrive", None) or getattr(line_mod, "Drive", None)
             self._LineSettings = getattr(self._gpiod, "LineSettings", None) or getattr(line_mod, "LineSettings", None)
             if not all((self._Direction, self._Bias, self._Value, self._LineSettings)):
                 raise RuntimeError("Unsupported gpiod v2 API")
@@ -81,6 +82,7 @@ class LibgpiodAdapter(GpioAdapter):
             self._chip = self._gpiod.Chip(self._chip_path)
 
     def setup_input(self, line: int, pull_up: bool = True) -> None:
+        self._release_line(line)
         if self._backend == "v2":
             bias = self._Bias.PULL_UP if pull_up else self._Bias.AS_IS
             settings = self._LineSettings(direction=self._Direction.INPUT, bias=bias)
@@ -99,26 +101,62 @@ class LibgpiodAdapter(GpioAdapter):
         line_obj.request(consumer=self._consumer, type=self._gpiod.LINE_REQ_DIR_IN, flags=flags)
         self._lines[line] = line_obj
 
-    def setup_output(self, line: int, initial: bool = False) -> None:
+    def setup_output(self, line: int, initial: bool = False, open_drain: bool = False) -> bool:
+        self._release_line(line)
+        configured_open_drain = False
         if self._backend == "v2":
             value = self._encode_value(initial)
-            settings = self._LineSettings(direction=self._Direction.OUTPUT, output_value=value)
+            settings_kwargs: Dict[str, Any] = {
+                "direction": self._Direction.OUTPUT,
+                "output_value": value,
+            }
+            if open_drain and self._Drive is not None:
+                settings_kwargs["drive"] = self._Drive.OPEN_DRAIN
+                configured_open_drain = True
+            elif open_drain:
+                LOGGER.debug("open-drain requested for line %s but gpiod v2 drive control is unavailable", line)
+            try:
+                settings = self._LineSettings(**settings_kwargs)
+            except TypeError:
+                # Some bindings expose LineDrive but LineSettings may not accept drive kwarg.
+                settings = self._LineSettings(direction=self._Direction.OUTPUT, output_value=value)
+                if configured_open_drain:
+                    configured_open_drain = False
+                    LOGGER.debug("gpiod v2 LineSettings rejected drive kwarg; line %s not open-drain", line)
             req = self._gpiod.request_lines(
                 self._chip_path,
                 consumer=self._consumer,
                 config={line: settings},
             )
             self._requests[line] = req
-            return
+            return configured_open_drain
 
         line_obj = self._chip.get_line(line)
         defaults = [1 if initial else 0]
-        line_obj.request(
-            consumer=self._consumer,
-            type=self._gpiod.LINE_REQ_DIR_OUT,
-            default_vals=defaults,
-        )
+        flags = 0
+        if open_drain and hasattr(self._gpiod, "LINE_REQ_FLAG_OPEN_DRAIN"):
+            flags |= self._gpiod.LINE_REQ_FLAG_OPEN_DRAIN
+            configured_open_drain = True
+        elif open_drain:
+            LOGGER.debug("open-drain requested for line %s but gpiod v1 open-drain flag is unavailable", line)
+        try:
+            line_obj.request(
+                consumer=self._consumer,
+                type=self._gpiod.LINE_REQ_DIR_OUT,
+                default_vals=defaults,
+                flags=flags,
+            )
+        except TypeError:
+            line_obj.request(
+                consumer=self._consumer,
+                type=self._gpiod.LINE_REQ_DIR_OUT,
+                default_vals=defaults,
+            )
+            if configured_open_drain:
+                configured_open_drain = False
+                LOGGER.debug("gpiod v1 request() ignored flags signature; line %s not open-drain", line)
         self._lines[line] = line_obj
+        return configured_open_drain
 
     def read(self, line: int) -> int:
         if self._backend == "v2":
@@ -145,19 +183,39 @@ class LibgpiodAdapter(GpioAdapter):
 
     def close(self) -> None:
         for req in self._requests.values():
-            if hasattr(req, "release"):
-                try:
-                    req.release()
-                except OSError:
-                    pass
+            self._release_handle(req)
         for line in self._lines.values():
-            try:
-                line.release()
-            except OSError:
-                pass
+            self._release_handle(line)
+        self._requests.clear()
+        self._lines.clear()
         if self._chip is not None:
             try:
                 self._chip.close()
+            except OSError:
+                pass
+
+    def _release_line(self, line: int) -> None:
+        req = self._requests.pop(line, None)
+        self._release_handle(req)
+
+        line_obj = self._lines.pop(line, None)
+        self._release_handle(line_obj)
+
+    @staticmethod
+    def _release_handle(handle: Any) -> None:
+        if handle is None:
+            return
+        release = getattr(handle, "release", None)
+        if callable(release):
+            try:
+                release()
+            except OSError:
+                pass
+            return
+        close = getattr(handle, "close", None)
+        if callable(close):
+            try:
+                close()
             except OSError:
                 pass
 

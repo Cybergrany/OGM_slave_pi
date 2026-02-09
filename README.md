@@ -291,7 +291,7 @@ from `ogm_pi.pin_runtime`.
 - Add/maintain trait footprint in `OGM_The_Core/Defines/CustomSlaveDefines/PinTraits.yaml`.
 - Add runtime module in `OGM_The_Core/Defines/CustomSlaveDefines/slave_pi/` exporting `HANDLER_TYPES`.
 - Use pin entries in `ExternalIODefines.yaml` with matching type and args.
-  For `segmentDisplay_tm1637`: `args: [clk_gpio, dio_gpio, optional_boot_test_ms]`.
+  For `segmentDisplay_tm1637`: `args: [clk_gpio, dio_gpio, optional_boot_test_ms, optional_bit_delay_us]`.
 - Deploy using `OGM_The_Core/scripts/deploy_slave_pi.py` so custom handler files are synced to the Pi runtime.
 
 ## Notes / gotchas
