@@ -2,7 +2,7 @@
 """Subscribe to OGM_slave_pi change events over the IPC socket.
 
 Usage example:
-  ./scripts/subscribe.py --socket /run/ogm_pi.sock --types coils,holding_regs
+  ./scripts/subscribe.py --socket /run/ogm_pi.sock --types coils,holding_regs --events change,board_reset
 """
 
 from __future__ import annotations
@@ -19,6 +19,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Subscribe to OGM_slave_pi change events")
     parser.add_argument("--socket", default="/run/ogm_pi.sock", help="Path to IPC socket")
     parser.add_argument(
+        "--events",
+        default="change",
+        help="Comma-separated event kinds to watch (change,board_reset)",
+    )
+    parser.add_argument(
         "--types",
         default="coils,holding_regs",
         help="Comma-separated register types to watch (coils,holding_regs)",
@@ -34,8 +39,9 @@ def parse_args() -> argparse.Namespace:
 
 def build_request(args: argparse.Namespace) -> Dict[str, Any]:
     """Build a subscribe request payload."""
+    events = [e.strip() for e in args.events.split(",") if e.strip()]
     types = [t.strip() for t in args.types.split(",") if t.strip()]
-    payload: Dict[str, Any] = {"id": 1, "cmd": "subscribe", "types": types}
+    payload: Dict[str, Any] = {"id": 1, "cmd": "subscribe", "events": events, "types": types}
     if args.names:
         names = [n.strip() for n in args.names.split(",") if n.strip()]
         if names:

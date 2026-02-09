@@ -34,6 +34,13 @@ logs and crash dumps are persisted under:
 - `runtime_failures.log`
 - `crash_dumps/` (timestamped dumps + `latest.log`)
 
+## Pi hook test app
+
+Deploy-loadable GUI-emulation integration tests live under `tests/`.
+
+- Setup/install/run/uninstall guide: `tests/README.md`
+- Test app payload source: `tests/slave_pi_apps/gui_hook_test`
+
 ## Installation (Pi)
 
 1) **Install system dependencies** (libmodbus runtime + libgpiod bindings):
@@ -74,14 +81,37 @@ Example:
 ```yaml
 pinmap: /etc/ogm_pi/pinmap.json
 custom_types_dir: /opt/OGM_slave_pi/custom_types
+apps_dir: /opt/OGM_slave_pi/apps
 serial: /dev/serial0
 baud: 250000
 slave_address: 99
 gpio_chip: /dev/gpiochip0
 modbus_log_every_failure: false
 modbus_show_all_frames: false
+app:
+  enabled: false
+  name: default
+  command: ""
+  # Optional. If blank, daemon uses "<apps_dir>/<app.name>".
+  cwd: ""
+  restart_policy: always
+  restart_backoff_ms: 2000
+  startup_timeout_ms: 10000
+  shutdown_timeout_ms: 5000
+  # Pin names resolved once to handles and passed to child app via env.
+  pin_bindings: []
+  # Pin names that map to GPIO lines this app may access through IPC.
+  gpio_bindings: []
+  env: {}
 ```
 For USB adapters instead of GPIO14/15 UART, use `serial: /dev/ttyUSB0` (or your adapter path).
+
+Child app environment injected by daemon:
+- `OGM_PI_SOCKET_PATH`
+- `OGM_PI_APPS_DIR`
+- `OGM_PI_PINMAP_HASH`, `OGM_PI_BOARD_ID`, `OGM_PI_BOARD_NAME`
+- `OGM_PI_PIN_BINDINGS` (JSON array of `{name,handle}`)
+- `OGM_PI_GPIO_BINDINGS` (JSON array of `{name,handle,line}`)
 
 6) **Run the daemon**:
 ```bash
@@ -112,25 +142,34 @@ Supported commands:
 - `get` (read all registers associated with a pin)
 - `set` (write registers; IPC allows all types)
 - `schema` (return the full pinmap JSON)
-- `subscribe` (stream master-originated changes for coils/holding regs)
+- `resolve` (resolve pin names to stable integer handles)
+- `get_many` / `set_many` (batch read/write by handle)
+- `gpio_read` / `gpio_write` (GPIO by handle; app-claimed lines only)
+- `app_reload` (restart configured child app process without daemon restart)
+- `subscribe` (stream events: `change`, `board_reset`)
 
 Examples:
 ```bash
 python3 -m ogm_pi.cli list
 python3 -m ogm_pi.cli get DoorSensor
 python3 -m ogm_pi.cli set LightRelay --type coils --value 1
+python3 -m ogm_pi.cli resolve DoorSensor LightRelay
+python3 -m ogm_pi.cli get-many 1 2
+python3 -m ogm_pi.cli app-reload
 python3 -m ogm_pi.cli schema
 ```
 
 Subscribe example (NDJSON stream):
 ```bash
-printf '{"id":1,"cmd":"subscribe","types":["coils","holding_regs"]}\n' | socat - UNIX-CONNECT:/run/ogm_pi.sock
+printf '{"id":1,"cmd":"subscribe","events":["change","board_reset"],"types":["coils","holding_regs"]}\n' | socat - UNIX-CONNECT:/run/ogm_pi.sock
 ```
 Helper script:
 ```bash
-./scripts/subscribe.py --socket /run/ogm_pi.sock --types coils,holding_regs
+./scripts/subscribe.py --socket /run/ogm_pi.sock --events change,board_reset --types coils,holding_regs
 ```
-`subscribe` only emits events for Modbus master writes (IPC writes do not trigger events).
+`subscribe` emits:
+- `change` for Modbus master writes (IPC writes do not trigger `change`)
+- `board_reset` when `BOARD_RESET` runs through runtime reset flow
 
 `get` can include `since` to check for master-originated changes:
 ```bash
@@ -246,6 +285,7 @@ touching systemd. If you change `--target-dir`, `--config-dir`, or `--socket-pat
 the installer writes matching systemd units.
 Custom handler modules default to `<target-dir>/custom_types`; override with
 `--custom-types-dir` if needed.
+Child app payload root defaults to `<target-dir>/apps`; override with `--apps-dir`.
 
 ## Pinmap JSON schema (v1)
 
@@ -290,9 +330,11 @@ from `ogm_pi.pin_runtime`.
 
 - Add/maintain trait footprint in `OGM_The_Core/Defines/CustomSlaveDefines/PinTraits.yaml`.
 - Add runtime module in `OGM_The_Core/Defines/CustomSlaveDefines/slave_pi/` exporting `HANDLER_TYPES`.
+- Add app payload files (optional) in `OGM_The_Core/Defines/CustomSlaveDefines/slave_pi_apps/`.
 - Use pin entries in `ExternalIODefines.yaml` with matching type and args.
   For `segmentDisplay_tm1637`: `args: [clk_gpio, dio_gpio, optional_boot_test_ms, optional_bit_delay_us]`.
 - Deploy using `OGM_The_Core/scripts/deploy_slave_pi.py` so custom handler files are synced to the Pi runtime.
+- Use deploy action `sync-app` to hotload app payload updates and trigger `app_reload`.
 
 ## Notes / gotchas
 
@@ -303,6 +345,7 @@ from `ogm_pi.pin_runtime`.
 - If a pin is named `pi_cpu_temp_c_x100` or `pi_cpu_load_1m_x100`, the daemon will populate it from system metrics.
 - BOARD_STATS uptime uses the daemon service lifetime (resets on service restart).
 - BOARD_SHUTDOWN is an edge-triggered admin pin (`1 coil + 1 discrete online flag`): when its coil is set true the daemon clears the coil, sets online false, then runs `sudo -n /usr/local/sbin/ogm_pi_shutdown` (installed by `install_pi.sh`, executes `shutdown now` as root). Wake is not implemented; bring the slave back by external power cycle.
+- GPIO collisions are hard-fail: runtime pin handlers and child apps cannot claim the same line.
 
 ## Example Raspberry Pi board entry
 
