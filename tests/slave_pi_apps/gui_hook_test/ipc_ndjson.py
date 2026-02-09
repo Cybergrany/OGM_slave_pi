@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 from typing import Any, Dict, Iterable, Optional
 
 
@@ -81,14 +82,11 @@ def wait_for_event(
     timeout_s: float = 5.0,
 ) -> Optional[Dict[str, Any]]:
     """Wait for a named event on an open subscription stream."""
-    timeout = max(float(timeout_s), 0.1)
-    sock_obj = getattr(stream, "_sock", None)
-    if sock_obj is not None:
-        sock_obj.settimeout(timeout)
-    while True:
+    end = time.monotonic() + max(float(timeout_s), 0.1)
+    while time.monotonic() < end:
         try:
             raw = stream.readline()
-        except socket.timeout:
+        except (socket.timeout, TimeoutError, OSError):
             return None
         if not raw:
             return None
@@ -98,3 +96,4 @@ def wait_for_event(
             continue
         if isinstance(obj, dict) and obj.get("event") == event_name:
             return obj
+    return None
