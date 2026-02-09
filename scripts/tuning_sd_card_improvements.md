@@ -27,13 +27,13 @@ If you want one universal “start here” set for most Pis (1–4 GB): **ZRAM_P
 
 For a Raspberry Pi Zero 2 W (512 MB RAM), start conservatively so tmpfs doesn’t steal too much memory from services.
 
-### Recommended “safe default” preset
+### Recommended “safe default” preset used for RPI zero
 
-* **ZRAM_PCT:** **50**
+* **ZRAM_PCT:** **40**
   (≈256 MiB zram swap)
-* **/tmp tmpfs (MB):** **64**
-* **/var/tmp tmpfs (MB):** **32**
-* **journald cap (MB):** **50** (persistent, capped)
+* **/tmp tmpfs (MB):** **0**
+* **/var/tmp tmpfs (MB):** **0**
+* **journald cap (MB):** **100** (persistent, capped)
 
 ### What these choices do (and why they fit a Zero 2 W)
 
