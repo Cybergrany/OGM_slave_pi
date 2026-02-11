@@ -464,7 +464,14 @@ ensure_group_user() {
   if ! id -u ogm_pi >/dev/null 2>&1; then
     useradd -r -g ogm -d /nonexistent -s /usr/sbin/nologin ogm_pi
   fi
-  usermod -a -G gpio,dialout ogm_pi
+  local groups="gpio,dialout"
+  if getent group video >/dev/null 2>&1; then
+    groups="${groups},video"
+  fi
+  if getent group render >/dev/null 2>&1; then
+    groups="${groups},render"
+  fi
+  usermod -a -G "$groups" ogm_pi
   if [[ -n "$CONFIG_ACCESS_USER" ]]; then
     usermod -a -G ogm "$CONFIG_ACCESS_USER" >/dev/null 2>&1 || true
   fi
@@ -821,17 +828,31 @@ setup_systemd_override() {
   if [[ "$SKIP_SYSTEMD" == "true" ]]; then
     return
   fi
+  local supp_groups="gpio dialout"
+  if getent group video >/dev/null 2>&1; then
+    supp_groups="${supp_groups} video"
+  fi
+  if getent group render >/dev/null 2>&1; then
+    supp_groups="${supp_groups} render"
+  fi
   local override_dir="/etc/systemd/system/ogm_pi.service.d"
   mkdir -p "$override_dir"
   cat > "${override_dir}/override.conf" <<EOF
 [Service]
 DevicePolicy=closed
+SupplementaryGroups=${supp_groups}
 EOF
   if [[ "$NO_MODBUS" != "true" ]]; then
     echo "DeviceAllow=${SERIAL} rwm" >> "${override_dir}/override.conf"
   fi
   if [[ "$NO_GPIO" != "true" ]]; then
     echo "DeviceAllow=${GPIO_CHIP} rwm" >> "${override_dir}/override.conf"
+  fi
+  if [[ -e /dev/dri/card0 ]]; then
+    echo "DeviceAllow=/dev/dri/card0 rwm" >> "${override_dir}/override.conf"
+  fi
+  if [[ -e /dev/dri/renderD128 ]]; then
+    echo "DeviceAllow=/dev/dri/renderD128 rwm" >> "${override_dir}/override.conf"
   fi
 }
 
@@ -908,9 +929,39 @@ if [[ "$SKIP_APT" != "true" ]]; then
     echo "ERROR: Could not find a Python gpiod package (tried: python3-libgpiod, python3-gpiod)." >&2
     exit 1
   fi
+  SDL_RUNTIME_PKG="$(pick_first_available_pkg libsdl2-2.0-0 libsdl2-2.0-0t64 || true)"
+  if [[ -z "$SDL_RUNTIME_PKG" ]]; then
+    echo "ERROR: Could not find an SDL2 runtime package (tried: libsdl2-2.0-0, libsdl2-2.0-0t64)." >&2
+    exit 1
+  fi
+  EGL_RUNTIME_PKG="$(pick_first_available_pkg libegl1 || true)"
+  if [[ -z "$EGL_RUNTIME_PKG" ]]; then
+    echo "ERROR: Could not find EGL runtime package libegl1." >&2
+    exit 1
+  fi
+  GLES_RUNTIME_PKG="$(pick_first_available_pkg libgles2 || true)"
+  if [[ -z "$GLES_RUNTIME_PKG" ]]; then
+    echo "ERROR: Could not find GLES runtime package libgles2." >&2
+    exit 1
+  fi
+  GBM_RUNTIME_PKG="$(pick_first_available_pkg libgbm1 || true)"
+  if [[ -z "$GBM_RUNTIME_PKG" ]]; then
+    echo "ERROR: Could not find GBM runtime package libgbm1." >&2
+    exit 1
+  fi
+  DRM_RUNTIME_PKG="$(pick_first_available_pkg libdrm2 || true)"
+  if [[ -z "$DRM_RUNTIME_PKG" ]]; then
+    echo "ERROR: Could not find DRM runtime package libdrm2." >&2
+    exit 1
+  fi
   apt-get install -y \
     acl \
     "$MODBUS_RUNTIME_PKG" \
+    "$SDL_RUNTIME_PKG" \
+    "$EGL_RUNTIME_PKG" \
+    "$GLES_RUNTIME_PKG" \
+    "$GBM_RUNTIME_PKG" \
+    "$DRM_RUNTIME_PKG" \
     sudo \
     python3 \
     python3-venv \
