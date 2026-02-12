@@ -148,6 +148,9 @@ def compute_board_hash(board: Dict[str, Any], pins: Iterable[Dict[str, Any]]) ->
 
 def compute_child_hash(child: Dict[str, Any], parent: Dict[str, Any], pins: Iterable[Dict[str, Any]]) -> int:
     """Compute the same child hash as OGM_Portable's generator."""
+    # TODO(bridge-pinmap): Include resolved register spans in the hash seed.
+    # Today we hash only declared pin fields (name/type/pin/args), so trait-only
+    # changes can shift child register offsets while the hash remains unchanged.
     parts = [
         f"child:{child['name']}",
         f"parent:{parent['name']}",
