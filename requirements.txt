@@ -1,3 +1,6 @@
 # Runtime dependencies for OGM_slave_pi tools and daemon.
 PyYAML>=6.0
 gpiod>=1.5  # Prefer system package python3-libgpiod on Debian/RPi OS.
+Pillow>=10.0
+PySDL2>=0.9.16
+PyOpenGL>=3.1.7
