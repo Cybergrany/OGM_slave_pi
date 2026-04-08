@@ -10,6 +10,7 @@ import threading
 import time
 from typing import IO
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional
 
 LOGGER = logging.getLogger(__name__)
@@ -169,6 +170,25 @@ class AppSupervisor:
                 "restart_policy": self.config.restart_policy,
             }
 
+    def _prepare_child_env(self, env: Dict[str, str], cwd: Optional[str]) -> None:
+        home_value = str(env.get("HOME", "")).strip()
+        needs_home = (not home_value) or (home_value == "/nonexistent")
+        if needs_home:
+            base_dir = Path(cwd) if cwd else (Path("/tmp") / f"ogm_pi_app_{self.config.name}")
+            runtime_home = base_dir / ".app_home"
+            runtime_home.mkdir(parents=True, exist_ok=True)
+            env["HOME"] = str(runtime_home)
+            home_value = str(runtime_home)
+            LOGGER.info("App[%s] assigned writable HOME=%s", self.config.name, runtime_home)
+
+        if home_value:
+            xdg_config = str(env.get("XDG_CONFIG_HOME", "")).strip() or str(Path(home_value) / ".config")
+            xdg_cache = str(env.get("XDG_CACHE_HOME", "")).strip() or str(Path(home_value) / ".cache")
+            Path(xdg_config).mkdir(parents=True, exist_ok=True)
+            Path(xdg_cache).mkdir(parents=True, exist_ok=True)
+            env.setdefault("XDG_CONFIG_HOME", xdg_config)
+            env.setdefault("XDG_CACHE_HOME", xdg_cache)
+
     def _spawn_locked(self, *, reason: str) -> None:
         env = os.environ.copy()
         if self.config.env:
@@ -178,6 +198,7 @@ class AppSupervisor:
             env[str(key)] = str(value)
 
         cwd = self.config.cwd or None
+        self._prepare_child_env(env, cwd)
         LOGGER.info("Starting app process (%s): %s", reason, " ".join(self._command))
         self._process = subprocess.Popen(
             self._command,
