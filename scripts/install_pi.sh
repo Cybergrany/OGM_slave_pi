@@ -465,6 +465,9 @@ ensure_group_user() {
     useradd -r -g ogm -d /nonexistent -s /usr/sbin/nologin ogm_pi
   fi
   local groups="gpio,dialout"
+  if getent group audio >/dev/null 2>&1; then
+    groups="${groups},audio"
+  fi
   if getent group video >/dev/null 2>&1; then
     groups="${groups},video"
   fi
@@ -829,6 +832,9 @@ setup_systemd_override() {
     return
   fi
   local supp_groups="gpio dialout"
+  if getent group audio >/dev/null 2>&1; then
+    supp_groups="${supp_groups} audio"
+  fi
   if getent group video >/dev/null 2>&1; then
     supp_groups="${supp_groups} video"
   fi
@@ -847,6 +853,14 @@ EOF
   fi
   if [[ "$NO_GPIO" != "true" ]]; then
     echo "DeviceAllow=${GPIO_CHIP} rwm" >> "${override_dir}/override.conf"
+  fi
+  if [[ -d /dev/snd ]]; then
+    local snd_dev=""
+    for snd_dev in /dev/snd/*; do
+      if [[ -e "$snd_dev" ]]; then
+        echo "DeviceAllow=${snd_dev} rwm" >> "${override_dir}/override.conf"
+      fi
+    done
   fi
   if [[ -e /dev/dri/card0 ]]; then
     echo "DeviceAllow=/dev/dri/card0 rwm" >> "${override_dir}/override.conf"

@@ -27,7 +27,7 @@ ProtectKernelLogs=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 ReadWritePaths=/opt/OGM_slave_pi
-SupplementaryGroups=gpio dialout
+SupplementaryGroups=gpio dialout audio
 
 [Install]
 WantedBy=multi-user.target
