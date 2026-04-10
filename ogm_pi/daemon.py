@@ -298,6 +298,7 @@ def wait_for_ipc_ready(socket_path: str, *, timeout_s: float = 5.0) -> None:
     """Wait until the IPC socket accepts a request and returns a valid response."""
     deadline = time.monotonic() + max(float(timeout_s), 0.1)
     last_error = "timeout"
+    LOGGER.info("IPC readiness probe waiting on %s (timeout=%.1fs)", socket_path, timeout_s)
     while time.monotonic() < deadline:
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
@@ -310,6 +311,7 @@ def wait_for_ipc_ready(socket_path: str, *, timeout_s: float = 5.0) -> None:
                 raise RuntimeError("empty IPC probe response")
             payload = json.loads(raw.decode("utf-8"))
             if isinstance(payload, dict) and bool(payload.get("ok", False)):
+                LOGGER.info("IPC readiness probe succeeded on %s", socket_path)
                 return
             last_error = f"invalid IPC probe response: {payload!r}"
         except Exception as exc:
@@ -616,8 +618,10 @@ def main() -> int:
         raise exc
 
     runtime.start()
+    LOGGER.info("IPC child-app startup gate enabled")
     wait_for_ipc_ready(str(settings["socket_path"]), timeout_s=5.0)
     if app_supervisor is not None:
+        LOGGER.info("Starting child app after IPC readiness confirmation")
         app_supervisor.start()
 
     shutdown_once = threading.Event()
@@ -710,6 +714,7 @@ def main() -> int:
                     raise RuntimeError(
                         f"IPC server restart failed: {ipc_error or 'thread exited during restart'}"
                     )
+                LOGGER.info("IPC restart gate waiting before child app continues")
                 wait_for_ipc_ready(str(settings["socket_path"]), timeout_s=5.0)
                 continue
             ipc_restart_attempts = 0
