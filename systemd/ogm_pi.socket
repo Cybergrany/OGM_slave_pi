@@ -1,6 +1,7 @@
 # OGM_slave_pi IPC socket (root-owned, systemd-managed).
 [Unit]
 Description=OGM Pi IPC Socket
+PartOf=ogm_pi.service
 
 [Socket]
 ListenStream=/run/ogm_pi.sock
