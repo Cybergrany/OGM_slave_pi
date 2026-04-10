@@ -492,6 +492,7 @@ class IPCServer:
         """Create or reuse a listening socket (systemd socket activation supported)."""
         sock = systemd_listen_socket()
         if sock is not None:
+            LOGGER.info("IPC using systemd socket activation")
             return sock
 
         if os.path.exists(self._socket_path):
@@ -500,6 +501,7 @@ class IPCServer:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.bind(self._socket_path)
         sock.listen(5)
+        LOGGER.info("IPC bound local socket path %s", self._socket_path)
         return sock
 
 

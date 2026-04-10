@@ -3,6 +3,7 @@
 Description=OGM Pi Modbus RTU + IPC Daemon
 Requires=ogm_pi.socket
 After=ogm_pi.socket
+Sockets=ogm_pi.socket
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
@@ -26,7 +27,7 @@ ProtectKernelLogs=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 ReadWritePaths=/opt/OGM_slave_pi
-SupplementaryGroups=gpio dialout
+SupplementaryGroups=gpio dialout audio
 
 [Install]
 WantedBy=multi-user.target
