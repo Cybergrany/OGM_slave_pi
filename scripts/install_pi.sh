@@ -854,14 +854,7 @@ EOF
   if [[ "$NO_GPIO" != "true" ]]; then
     echo "DeviceAllow=${GPIO_CHIP} rwm" >> "${override_dir}/override.conf"
   fi
-  if [[ -d /dev/snd ]]; then
-    local snd_dev=""
-    for snd_dev in /dev/snd/*; do
-      if [[ -e "$snd_dev" ]]; then
-        echo "DeviceAllow=${snd_dev} rwm" >> "${override_dir}/override.conf"
-      fi
-    done
-  fi
+  echo "DeviceAllow=char-alsa rwm" >> "${override_dir}/override.conf"
   if [[ -e /dev/dri/card0 ]]; then
     echo "DeviceAllow=/dev/dri/card0 rwm" >> "${override_dir}/override.conf"
   fi
