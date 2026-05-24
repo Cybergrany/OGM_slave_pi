@@ -151,26 +151,27 @@ class ChangeTracker:
 
     def events_from_updates(self, updates: Dict[str, List[tuple[int, int]]], tables: Dict[str, List[int]]) -> List[Dict[str, Any]]:
         """Build change events from sparse updates and current table snapshots."""
-        changed: Dict[str, Set[str]] = {}
+        changed: Dict[str, Dict[str, Set[int]]] = {}
 
         for idx, _value in updates.get("coils", []):
             pin = self._coil_index[idx] if 0 <= idx < len(self._coil_index) else None
             if pin is not None:
-                changed.setdefault(pin.name, set()).add("coils")
+                changed.setdefault(pin.name, {}).setdefault("coils", set()).add(idx - pin.coils.start)
 
         for idx, _value in updates.get("holding_regs", []):
             pin = self._holding_index[idx] if 0 <= idx < len(self._holding_index) else None
             if pin is not None:
-                changed.setdefault(pin.name, set()).add("holding_regs")
+                changed.setdefault(pin.name, {}).setdefault("holding_regs", set()).add(idx - pin.holding_regs.start)
 
         return self._build_events(changed, tables)
 
-    def _build_events(self, changed: Dict[str, Set[str]], tables: Dict[str, List[int]]) -> List[Dict[str, Any]]:
+    def _build_events(self, changed: Dict[str, Dict[str, Set[int]]], tables: Dict[str, List[int]]) -> List[Dict[str, Any]]:
         events: List[Dict[str, Any]] = []
-        for name, types in changed.items():
+        for name, offsets_by_type in changed.items():
             pin = self._pins_by_name.get(name)
             if pin is None:
                 continue
+            types = set(offsets_by_type.keys())
             values: Dict[str, List[int]] = {}
             if "coils" in types:
                 values["coils"] = self._slice_values(tables.get("coils", []), pin.coils.start, pin.coils.count)
@@ -190,6 +191,11 @@ class ChangeTracker:
                     "source": "modbus",
                     "name": name,
                     "types": sorted(types),
+                    "changed_offsets": {
+                        type_name: sorted(offsets)
+                        for type_name, offsets in offsets_by_type.items()
+                        if offsets
+                    },
                     "values": values,
                 }
             )
