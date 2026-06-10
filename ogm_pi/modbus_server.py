@@ -1215,11 +1215,12 @@ class LibModbusBackend(ModbusBackend):
         if not updates:
             return
 
-        self._store.apply_index_updates(updates, track_dirty=False)
+        events: List[Dict[str, Any]] = []
         if self._event_sink is not None:
             events = self._tracker.events_from_updates(updates, self._shadow)
             if events:
                 self._event_sink(events)
+        self._store.apply_index_updates(updates, track_dirty=False)
 
     def _handle_fatal_error(self, exc: Exception) -> None:
         self._stop_event.set()
