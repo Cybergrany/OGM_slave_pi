@@ -9,8 +9,9 @@ import queue
 import socket
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, Optional, Set
+from typing import Any, Callable, Deque, Dict, Iterable, Optional, Set
 
 from .gpio import GpioAdapter
 from .gpio_claims import GpioClaimRegistry
@@ -25,6 +26,8 @@ SUPPORTED_TYPES = {"coils", "holding_regs"}
 
 DEFAULT_SUBSCRIBE_EVENTS = {"change"}
 SUPPORTED_EVENTS = {"change", "board_reset"}
+DEFAULT_EVENT_LOG_MAX = 4096
+DEFAULT_SUBSCRIBER_QUEUE_MAX = 256
 
 
 @dataclass
@@ -37,6 +40,7 @@ class Subscriber:
     names: Optional[Set[str]]
     queue: "queue.Queue[Dict[str, Any]]"
     dropped: int = 0
+    closed: bool = False
 
     def matches(self, event: Dict[str, Any]) -> bool:
         """Return True if this subscriber should receive the event."""
@@ -59,17 +63,34 @@ class Subscriber:
             return False
         return True
 
-    def enqueue(self, event: Dict[str, Any]) -> None:
-        """Queue an event for delivery, dropping the oldest if needed."""
+    def enqueue(self, event: Dict[str, Any]) -> bool:
+        """Queue an event for delivery; return False when overflow closes it."""
+        if self.closed:
+            return False
         try:
             self.queue.put_nowait(event)
+            return True
         except queue.Full:
             try:
                 self.queue.get_nowait()
-                self.queue.put_nowait(event)
                 self.dropped += 1
             except queue.Empty:
                 pass
+            self.closed = True
+            overflow = {
+                "event": "subscription_error",
+                "error": "queue_overflow",
+                "message": "subscriber queue overflow; event stream is no longer lossless",
+                "dropped": self.dropped,
+                "overflow_at_ipc_seq": event.get("ipc_seq"),
+                "overflow_event": event.get("event"),
+                "overflow_name": event.get("name"),
+            }
+            try:
+                self.queue.put_nowait(overflow)
+            except queue.Full:
+                pass
+            return False
 
 
 class IPCServer:
@@ -85,6 +106,8 @@ class IPCServer:
         gpio: Optional[GpioAdapter] = None,
         gpio_claims: Optional[GpioClaimRegistry] = None,
         app_reload_cb: Optional[Callable[[], Dict[str, Any]]] = None,
+        event_log_max: int = DEFAULT_EVENT_LOG_MAX,
+        subscriber_queue_max: int = DEFAULT_SUBSCRIBER_QUEUE_MAX,
     ) -> None:
         self._store = store
         self._pinmap = pinmap
@@ -93,12 +116,18 @@ class IPCServer:
         self._gpio = gpio
         self._gpio_claims = gpio_claims
         self._app_reload_cb = app_reload_cb
+        self._event_log_max = max(int(event_log_max), 1)
+        self._subscriber_queue_max = max(int(subscriber_queue_max), 1)
 
         self._sock: Optional[socket.socket] = None
         self._stop_event = threading.Event()
         self._subscribers: list[Subscriber] = []
         self._sub_lock = threading.Lock()
+        self._state_lock = threading.RLock()
         self._last_seq_by_pin: Dict[str, int] = {}
+        self._last_ipc_seq_by_pin: Dict[str, int] = {}
+        self._ipc_seq = 0
+        self._event_log: Deque[Dict[str, Any]] = deque(maxlen=self._event_log_max)
         self._startup_error: Optional[str] = None
         self._startup_error_lock = threading.Lock()
 
@@ -160,15 +189,45 @@ class IPCServer:
     def publish_events(self, events: Iterable[Dict[str, Any]]) -> None:
         """Publish events to any matching subscribers."""
         with self._sub_lock:
-            subscribers = list(self._subscribers)
-        for event in events:
-            name = event.get("name")
-            seq = event.get("seq")
-            if name and isinstance(seq, int):
-                self._last_seq_by_pin[str(name)] = seq
-            for sub in subscribers:
-                if sub.matches(event):
-                    sub.enqueue(event)
+            for raw_event in events:
+                event = dict(raw_event)
+                self._ipc_seq += 1
+                event["ipc_seq"] = self._ipc_seq
+                event.setdefault("ts_ms", int(time.time() * 1000))
+                name = event.get("name")
+                if name and event.get("event") == "change":
+                    pin_name = str(name)
+                    self._last_ipc_seq_by_pin[pin_name] = self._ipc_seq
+                    source_seq = event.get("seq")
+                    if isinstance(source_seq, int):
+                        self._last_seq_by_pin[pin_name] = source_seq
+                    else:
+                        self._last_seq_by_pin[pin_name] = max(
+                            self._last_seq_by_pin.get(pin_name, 0),
+                            self._ipc_seq,
+                        )
+                self._event_log.append(event)
+
+                overflowed: list[Subscriber] = []
+                for sub in list(self._subscribers):
+                    if not sub.matches(event):
+                        continue
+                    if not sub.enqueue(event):
+                        overflowed.append(sub)
+                for sub in overflowed:
+                    if sub in self._subscribers:
+                        self._subscribers.remove(sub)
+                    LOGGER.error(
+                        "IPC subscriber queue overflow; closing subscription "
+                        "events=%s types=%s names=%s at ipc_seq=%s event=%s name=%s dropped=%s",
+                        sorted(sub.events),
+                        sorted(sub.types),
+                        sorted(sub.names) if sub.names else None,
+                        event.get("ipc_seq"),
+                        event.get("event"),
+                        event.get("name"),
+                        sub.dropped,
+                    )
 
     def _handle_client(self, conn: socket.socket) -> None:
         """Handle a single client connection (one request per line)."""
@@ -225,13 +284,71 @@ class IPCServer:
     def _handle_subscribe(self, conn: socket.socket, request: Dict[str, Any]) -> None:
         """Register a subscription and stream events until disconnect."""
         request_id = request.get("id")
-        events = self._parse_events(request.get("events"))
-        types = self._parse_types(request.get("types"))
-        names = self._parse_names(request.get("names"))
-        subscriber = Subscriber(conn=conn, events=events, types=types, names=names, queue=queue.Queue(maxsize=256))
+        try:
+            events = self._parse_events(request.get("events"))
+            types = self._parse_types(request.get("types"))
+            names = self._parse_names(request.get("names"))
+            since_ipc_seq = self._parse_since_ipc_seq(request.get("since_ipc_seq"))
+        except ValueError as exc:
+            conn.sendall(json.dumps(self._error(str(exc), request_id)).encode("utf-8") + b"\n")
+            return
+
+        subscriber = Subscriber(
+            conn=conn,
+            events=events,
+            types=types,
+            names=names,
+            queue=queue.Queue(maxsize=self._subscriber_queue_max),
+        )
 
         with self._sub_lock:
+            current_ipc_seq = self._ipc_seq
+            replay_events: list[Dict[str, Any]] = []
+            if since_ipc_seq is not None:
+                oldest_ipc_seq = int(self._event_log[0]["ipc_seq"]) if self._event_log else current_ipc_seq + 1
+                if since_ipc_seq > current_ipc_seq:
+                    conn.sendall(
+                        json.dumps(
+                            self._error(
+                                f"since_ipc_seq {since_ipc_seq} is ahead of current ipc_seq {current_ipc_seq}",
+                                request_id,
+                            )
+                        ).encode("utf-8")
+                        + b"\n"
+                    )
+                    return
+                if since_ipc_seq < oldest_ipc_seq - 1:
+                    response = self._error("replay_unavailable", request_id)
+                    response.update(
+                        {
+                            "current_ipc_seq": current_ipc_seq,
+                            "oldest_ipc_seq": oldest_ipc_seq,
+                            "since_ipc_seq": since_ipc_seq,
+                        }
+                    )
+                    conn.sendall(json.dumps(response).encode("utf-8") + b"\n")
+                    return
+                replay_events = [
+                    event
+                    for event in self._event_log
+                    if int(event.get("ipc_seq", 0)) > since_ipc_seq and subscriber.matches(event)
+                ]
+                if len(replay_events) > self._subscriber_queue_max:
+                    response = self._error("replay_too_large", request_id)
+                    response.update(
+                        {
+                            "current_ipc_seq": current_ipc_seq,
+                            "since_ipc_seq": since_ipc_seq,
+                            "replay_count": len(replay_events),
+                            "queue_max": self._subscriber_queue_max,
+                        }
+                    )
+                    conn.sendall(json.dumps(response).encode("utf-8") + b"\n")
+                    return
+
             self._subscribers.append(subscriber)
+            for event in replay_events:
+                subscriber.enqueue(event)
 
         ack = {
             "ok": True,
@@ -239,6 +356,12 @@ class IPCServer:
             "events": sorted(events),
             "types": sorted(types),
             "names": sorted(names) if names else None,
+            "ipc_seq": current_ipc_seq,
+            "since_ipc_seq": since_ipc_seq,
+            "replayed": len(replay_events),
+            "event_log_max": self._event_log_max,
+            "queue_max": self._subscriber_queue_max,
+            "overflow_policy": "disconnect",
         }
         if request_id is not None:
             ack["id"] = request_id
@@ -249,8 +372,12 @@ class IPCServer:
                 try:
                     event = subscriber.queue.get(timeout=1.0)
                 except queue.Empty:
+                    if subscriber.closed:
+                        break
                     continue
                 conn.sendall(json.dumps(event).encode("utf-8") + b"\n")
+                if subscriber.closed:
+                    break
         except OSError:
             pass
         finally:
@@ -283,6 +410,19 @@ class IPCServer:
         if invalid:
             raise ValueError(f"Unsupported types: {sorted(invalid)}")
         return types
+
+    @staticmethod
+    def _parse_since_ipc_seq(raw: Any) -> Optional[int]:
+        """Parse optional replay lower bound for the central IPC event stream."""
+        if raw is None:
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError("since_ipc_seq must be an integer")
+        if value < 0:
+            raise ValueError("since_ipc_seq must be >= 0")
+        return value
 
     @staticmethod
     def _parse_names(raw: Any) -> Optional[Set[str]]:
@@ -323,28 +463,35 @@ class IPCServer:
     def _get_many(self, raw_handles: Any) -> Dict[str, Any]:
         if not isinstance(raw_handles, list):
             raise ValueError("handles must be a list")
-        items = []
-        for raw in raw_handles:
-            handle = self._coerce_handle(raw)
-            pin = self._resolver.pin_for_handle(handle)
-            items.append({"handle": handle, "name": pin.name, "values": self._store.get_pin(pin)})
-        return {"items": items}
+        with self._state_lock:
+            items = []
+            for raw in raw_handles:
+                handle = self._coerce_handle(raw)
+                pin = self._resolver.pin_for_handle(handle)
+                items.append({"handle": handle, "name": pin.name, "values": self._store.get_pin(pin)})
+            return {"items": items, "ipc_seq": self._ipc_seq}
 
     def _set_many(self, raw_writes: Any) -> Dict[str, Any]:
         if not isinstance(raw_writes, list):
             raise ValueError("writes must be a list")
-        items = []
-        for entry in raw_writes:
-            if not isinstance(entry, dict):
-                raise ValueError("each write entry must be an object")
-            handle = self._coerce_handle(entry.get("handle"))
-            values = entry.get("values")
-            if not isinstance(values, dict):
-                raise ValueError("write values must be an object of register arrays")
-            pin = self._resolver.pin_for_handle(handle)
-            updated = self._store.set_pin(pin, values)
-            items.append({"handle": handle, "name": pin.name, "values": updated})
-        return {"items": items}
+        with self._state_lock:
+            items = []
+            events: list[Dict[str, Any]] = []
+            for entry in raw_writes:
+                if not isinstance(entry, dict):
+                    raise ValueError("each write entry must be an object")
+                handle = self._coerce_handle(entry.get("handle"))
+                values = entry.get("values")
+                if not isinstance(values, dict):
+                    raise ValueError("write values must be an object of register arrays")
+                pin = self._resolver.pin_for_handle(handle)
+                before = self._store.get_pin(pin)
+                updated = self._store.set_pin(pin, values)
+                events.extend(self._change_events_from_pin_delta(pin.name, before, updated, source="ipc"))
+                items.append({"handle": handle, "name": pin.name, "values": updated})
+            if events:
+                self.publish_events(events)
+            return {"items": items, "ipc_seq": self._ipc_seq}
 
     def _gpio_read(self, raw_handles: Any) -> Dict[str, Any]:
         if self._gpio is None:
@@ -402,17 +549,20 @@ class IPCServer:
         """Return register values for a named pin."""
         if not name:
             raise ValueError("Missing pin name")
-        pin = self._pinmap.find_pin(str(name))
-        payload = {"name": pin.name, "values": self._store.get_pin(pin)}
-        if since is not None:
-            try:
-                since_val = int(since)
-            except (TypeError, ValueError):
-                raise ValueError("since must be an integer")
-            last_seq = self._last_seq_by_pin.get(pin.name, 0)
-            payload["changed"] = last_seq > since_val
-            payload["last_seq"] = last_seq
-        return payload
+        with self._state_lock:
+            pin = self._pinmap.find_pin(str(name))
+            payload = {"name": pin.name, "values": self._store.get_pin(pin), "ipc_seq": self._ipc_seq}
+            if since is not None:
+                try:
+                    since_val = int(since)
+                except (TypeError, ValueError):
+                    raise ValueError("since must be an integer")
+                last_seq = self._last_seq_by_pin.get(pin.name, 0)
+                last_ipc_seq = self._last_ipc_seq_by_pin.get(pin.name, 0)
+                payload["changed"] = last_seq > since_val
+                payload["last_seq"] = last_seq
+                payload["last_ipc_seq"] = last_ipc_seq
+            return payload
 
     def _set_pin(self, name: Any, values: Any) -> Dict[str, Any]:
         """Set register values for a named pin."""
@@ -420,9 +570,52 @@ class IPCServer:
             raise ValueError("Missing pin name")
         if not isinstance(values, dict):
             raise ValueError("values must be an object of register arrays")
-        pin = self._pinmap.find_pin(str(name))
-        updated = self._store.set_pin(pin, values)
-        return {"name": pin.name, "values": updated}
+        with self._state_lock:
+            pin = self._pinmap.find_pin(str(name))
+            before = self._store.get_pin(pin)
+            updated = self._store.set_pin(pin, values)
+            events = self._change_events_from_pin_delta(pin.name, before, updated, source="ipc")
+            if events:
+                self.publish_events(events)
+            return {"name": pin.name, "values": updated, "ipc_seq": self._ipc_seq}
+
+    def _change_events_from_pin_delta(
+        self,
+        name: str,
+        before: Dict[str, list[int]],
+        after: Dict[str, list[int]],
+        *,
+        source: str,
+    ) -> list[Dict[str, Any]]:
+        """Build IPC change events from before/after pin values."""
+        changed_offsets: Dict[str, list[int]] = {}
+        event_values: Dict[str, list[int]] = {}
+        for reg_name in sorted(SUPPORTED_TYPES):
+            old_values = before.get(reg_name)
+            new_values = after.get(reg_name)
+            if not isinstance(old_values, list) or not isinstance(new_values, list):
+                continue
+            offsets = [
+                idx
+                for idx, (old_value, new_value) in enumerate(zip(old_values, new_values))
+                if int(old_value) != int(new_value)
+            ]
+            if not offsets:
+                continue
+            changed_offsets[reg_name] = offsets
+            event_values[reg_name] = list(new_values)
+        if not changed_offsets:
+            return []
+        return [
+            {
+                "event": "change",
+                "source": source,
+                "name": name,
+                "types": sorted(changed_offsets),
+                "changed_offsets": changed_offsets,
+                "values": event_values,
+            }
+        ]
 
     @staticmethod
     def _handle_info_to_dict(info: HandleInfo) -> Dict[str, Any]:

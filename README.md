@@ -168,8 +168,10 @@ Helper script:
 ./scripts/subscribe.py --socket /run/ogm_pi.sock --events change,board_reset --types coils,holding_regs
 ```
 `subscribe` emits:
-- `change` for Modbus master writes (IPC writes do not trigger `change`)
+- `change` for Modbus master writes and IPC `set` / `set_many` writes
 - `board_reset` when `BOARD_RESET` runs through runtime reset flow
+- `ipc_seq` on every event; strict clients can reconnect with
+  `since_ipc_seq` to replay retained events without a delivery gap
 
 `get` can include `since` to check for master-originated changes:
 ```bash
