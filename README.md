@@ -316,8 +316,13 @@ Each pin record:
 - `coils`, `discretes`, `input_regs`, `holding_regs` as `[start, count]`
 
 `pin` may be an int or a string token (e.g., `A0`). `args` is always an
-array (empty if none) and is passed through without interpretation so
-future scripts can add semantics if needed.
+array (empty if none). For built-in `INPUT_DIGITAL`, the Pi runtime interprets
+`args: [latch_ms, debounce_ms]`, matching the Arduino slave definition:
+omitted, invalid, or zero values keep legacy immediate active-low GPIO behavior;
+`debounce_ms` delays reporting high until the input is stable, while low follows
+immediately; `latch_ms` holds each reported level for at least that duration.
+Because pin args are included in the layout hash, deploy matching master
+definitions and Pi pinmaps together when changing these values.
 
 ## Custom pin handlers
 

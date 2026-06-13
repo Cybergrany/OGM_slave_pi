@@ -29,6 +29,15 @@ def _parse_int_arg(args: List[Any], default: int = 0) -> int:
     return default
 
 
+def _parse_nonnegative_int_arg(args: List[Any], index: int, default: int = 0) -> int:
+    if len(args) <= index:
+        return default
+    try:
+        return max(0, int(args[index]))
+    except (TypeError, ValueError):
+        return default
+
+
 def _parse_u32_arg(args: List[Any], default: int = 0) -> int:
     if args:
         try:
@@ -311,27 +320,110 @@ class InputDigital(PinHandler):
         super().__init__(pin, store, runtime)
         self.di = RegHandle(store, "discretes", pin.discretes, 0)
         self._line = _resolve_gpio_line(pin.pin)
+        self._latch_ms = _parse_nonnegative_int_arg(pin.args, 0)
+        self._debounce_ms = _parse_nonnegative_int_arg(pin.args, 1)
+        self._sample_high = False
+        self._sample_changed_at = 0.0
+        self._stable_high = False
+        self._reported_high = False
+        self._reported_changed_at = 0.0
+        self._pending_high: Optional[bool] = None
 
     def init(self) -> None:
         if self._line is None:
             LOGGER.warning("InputDigital %s has unsupported pin %r", self.pin.name, self.pin.pin)
             return
         self.runtime.gpio.setup_input(self._line, pull_up=True)
-        self.update(time.monotonic())
+        self._prime_state(time.monotonic())
 
-    def update(self, _now: float) -> None:
+    def update(self, now: float) -> None:
         if self._line is None:
             return
-        raw = self.runtime.gpio.read(self._line)
-        self.di.set(0 if raw else 1)
+        raw_high = self._sample_input()
+        if self._latch_ms == 0 and self._debounce_ms == 0:
+            self.di.set(1 if raw_high else 0)
+            return
+
+        if self._debounce_ms > 0:
+            if raw_high != self._sample_high:
+                self._sample_high = raw_high
+                self._sample_changed_at = now
+
+            if raw_high != self._stable_high:
+                # Match Arduino INPUT_DIGITAL: debounce rising/high only; low follows immediately.
+                if not raw_high or self._elapsed_ms(now, self._sample_changed_at) >= self._debounce_ms:
+                    self._stable_high = raw_high
+                    if self._latch_ms > 0:
+                        self._request_reported_state(raw_high, now)
+                    else:
+                        self.di.set(1 if raw_high else 0)
+
+            if self._latch_ms > 0:
+                self._apply_pending_if_ready(now)
+            return
+
+        if raw_high != self._stable_high:
+            self._stable_high = raw_high
+            self._request_reported_state(raw_high, now)
+        self._apply_pending_if_ready(now)
 
     def reset(self) -> None:
-        self.update(time.monotonic())
+        if self._line is None:
+            return
+        self._prime_state(time.monotonic())
 
     def claimed_lines(self) -> List[int]:
         if self._line is None:
             return []
         return [self._line]
+
+    def _sample_input(self) -> bool:
+        return self.runtime.gpio.read(self._line) == 0
+
+    @staticmethod
+    def _elapsed_ms(now: float, start: float) -> float:
+        return (now - start) * 1000.0
+
+    def _prime_state(self, now: float) -> None:
+        raw_high = self._sample_input()
+        self._sample_high = raw_high
+        self._sample_changed_at = now
+        self._stable_high = raw_high
+        self._reported_high = raw_high
+        self._reported_changed_at = now
+        self._pending_high = None
+        self.di.set(1 if raw_high else 0)
+
+    def _set_reported_state(self, high: bool, now: float) -> None:
+        self._reported_high = high
+        self._reported_changed_at = now
+        self.di.set(1 if high else 0)
+
+    def _request_reported_state(self, desired_high: bool, now: float) -> None:
+        if desired_high == self._reported_high:
+            self._pending_high = None
+            return
+
+        if self._latch_ms == 0 or self._elapsed_ms(now, self._reported_changed_at) >= self._latch_ms:
+            self._pending_high = None
+            self._set_reported_state(desired_high, now)
+            return
+
+        self._pending_high = desired_high
+
+    def _apply_pending_if_ready(self, now: float) -> None:
+        if self._pending_high is None:
+            return
+        if self._latch_ms != 0 and self._elapsed_ms(now, self._reported_changed_at) < self._latch_ms:
+            return
+
+        pending_high = self._pending_high
+        self._pending_high = None
+        if pending_high != self._reported_high:
+            self._set_reported_state(pending_high, now)
+
+        if self._stable_high != self._reported_high:
+            self._request_reported_state(self._stable_high, now)
 
 
 class OutputDigital(PinHandler):
