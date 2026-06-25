@@ -3,7 +3,7 @@ import queue
 import threading
 import unittest
 
-from ogm_pi.ipc_server import IPCServer, Subscriber
+from ogm_pi.ipc_server import AppAccess, AppAccessPolicy, IPCServer, PEER_APP_REQUEST_KEY, Subscriber
 from ogm_pi.pinmap import PinMap, PinRecord, RegSpan
 from ogm_pi.store import RegisterStore
 
@@ -124,6 +124,67 @@ class IPCServerEventStreamTest(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertEqual(seen, [None])
         self.assertEqual(response["app"]["scope"], "all")
+
+    def test_app_scoped_ipc_allows_bound_reads(self) -> None:
+        server = make_server()
+        handle = server._resolver.handle_for_name("audio_slot_01")
+        server.set_app_access_policy(
+            AppAccessPolicy({"audio": AppAccess(read_handles={handle}, write_handles=set(), gpio_handles=set())})
+        )
+
+        response = server._handle_request(
+            {"id": 1, "cmd": "get_many", "handles": [handle], PEER_APP_REQUEST_KEY: "audio"}
+        )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["items"][0]["name"], "audio_slot_01")
+
+    def test_app_scoped_ipc_rejects_unbound_reads(self) -> None:
+        server = make_server()
+        allowed = server._resolver.handle_for_name("audio_slot_01")
+        denied = server._resolver.handle_for_name("audio_ctrl")
+        server.set_app_access_policy(
+            AppAccessPolicy({"audio": AppAccess(read_handles={allowed}, write_handles=set(), gpio_handles=set())})
+        )
+
+        with self.assertLogs("ogm_pi.ipc_server", level="ERROR"):
+            response = server._handle_request(
+                {"id": 1, "cmd": "get_many", "handles": [denied], PEER_APP_REQUEST_KEY: "audio"}
+            )
+
+        self.assertFalse(response["ok"])
+        self.assertIn("not allowed to read", response["error"])
+
+    def test_app_scoped_ipc_rejects_read_only_writes(self) -> None:
+        server = make_server()
+        handle = server._resolver.handle_for_name("audio_slot_01")
+        server.set_app_access_policy(
+            AppAccessPolicy({"audio": AppAccess(read_handles={handle}, write_handles=set(), gpio_handles=set())})
+        )
+
+        with self.assertLogs("ogm_pi.ipc_server", level="ERROR"):
+            response = server._handle_request(
+                {
+                    "id": 1,
+                    "cmd": "set_many",
+                    "writes": [{"handle": handle, "values": {"holding_regs": [0] * 9}}],
+                    PEER_APP_REQUEST_KEY: "audio",
+                }
+            )
+
+        self.assertFalse(response["ok"])
+        self.assertIn("not allowed to write", response["error"])
+
+    def test_admin_ipc_is_not_app_scoped(self) -> None:
+        server = make_server()
+        handle = server._resolver.handle_for_name("audio_slot_01")
+        server.set_app_access_policy(AppAccessPolicy({}))
+
+        response = server._handle_request(
+            {"id": 1, "cmd": "set_many", "writes": [{"handle": handle, "values": {"holding_regs": [0] * 9}}]}
+        )
+
+        self.assertTrue(response["ok"])
 
     def test_publish_events_assigns_ipc_seq_and_replays_since(self) -> None:
         server = make_server()

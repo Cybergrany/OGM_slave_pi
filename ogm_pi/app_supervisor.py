@@ -170,6 +170,13 @@ class AppSupervisor:
                 "restart_policy": self.config.restart_policy,
             }
 
+    def root_pid(self) -> Optional[int]:
+        with self._lock:
+            proc = self._process
+            if proc is None or proc.poll() is not None:
+                return None
+            return int(proc.pid)
+
     def _prepare_child_env(self, env: Dict[str, str], cwd: Optional[str]) -> None:
         home_value = str(env.get("HOME", "")).strip()
         needs_home = (not home_value) or (home_value == "/nonexistent")
@@ -341,3 +348,31 @@ class MultiAppSupervisor:
             "ok": True,
             "apps": {name: supervisor.status() for name, supervisor in self._supervisors.items()},
         }
+
+    def resolve_peer_app(self, pid: int) -> Optional[str]:
+        roots = {
+            int(root_pid): name
+            for name, supervisor in self._supervisors.items()
+            for root_pid in [supervisor.root_pid()]
+            if root_pid is not None
+        }
+        current = int(pid)
+        seen: set[int] = set()
+        while current > 1 and current not in seen:
+            owner = roots.get(current)
+            if owner is not None:
+                return owner
+            seen.add(current)
+            current = _read_ppid(current)
+        return None
+
+
+def _read_ppid(pid: int) -> int:
+    try:
+        with open(f"/proc/{int(pid)}/status", "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("PPid:"):
+                    return int(line.split(":", 1)[1].strip())
+    except Exception:
+        return 0
+    return 0

@@ -59,6 +59,7 @@ apps:
     shutdown_timeout_ms: 5000
     pin_bindings:
       - <writable_non_admin_pin_name>
+      - { name: <shared_read_only_pin_name>, access: read }
     gpio_bindings:
       - <app_claimable_gpio_pin_name>
     env: {}
@@ -70,8 +71,9 @@ Binding details (using `pi_pizza_right` as an example):
   - pin names resolved once at app startup and injected as `OGM_PI_PIN_BINDINGS`
     (`[{name,handle}, ...]`).
   - use for IPC `resolve`, `get_many`, and `set_many`.
-  - can include both read and write pins, but avoid admin/safety pins unless
-    you explicitly want to exercise them.
+  - plain string entries are writable; use `{name: SomePin, access: read}` for
+    shared observation without write ownership.
+  - the runtime rejects two enabled apps with writable access to the same pin.
 - `gpio_bindings`:
   - subset of pin names that map to real GPIO lines and are injected as
     `OGM_PI_GPIO_BINDINGS` (`[{name,handle,line}, ...]`).

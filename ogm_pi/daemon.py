@@ -22,7 +22,7 @@ import yaml
 
 from .app_supervisor import AppConfig, AppSupervisor, MultiAppSupervisor
 from .gpio_claims import GpioClaimError, GpioClaimRegistry
-from .ipc_server import IPCServer
+from .ipc_server import AppAccessPolicy, IPCServer
 from .gpio import LibgpiodAdapter, NullGpioAdapter
 from .modbus_server import create_backend
 from .pinmap import PinMap
@@ -39,6 +39,7 @@ APP_CONFIG_UPGRADE_MESSAGE = (
     "Incompatible OGM_slave_pi app config schema. Legacy single-app config is no longer supported. "
     "Run a full OGM_slave_pi runtime upgrade/install so app_config_version: 2 and apps: are generated."
 )
+PIN_BINDING_ACCESSES = {"read", "write", "read_write"}
 DEFAULT_SETTINGS = {
     "pinmap": None,
     "custom_types_dir": None,
@@ -387,6 +388,31 @@ def configure_logging(level: str, *, failure_log: str | None = None) -> None:
             root.warning("Could not open failure log at %s: %s", failure_log, exc)
 
 
+def parse_pin_binding_entries(raw_bindings: object, *, prefix: str) -> list[dict[str, str]]:
+    if not isinstance(raw_bindings, list):
+        raise ValueError(f"{prefix}.pin_bindings must be a list")
+
+    bindings: list[dict[str, str]] = []
+    for idx, raw_entry in enumerate(raw_bindings):
+        access = "read_write"
+        if isinstance(raw_entry, dict):
+            name = str(raw_entry.get("name") or "").strip()
+            access = str(raw_entry.get("access") or access).strip().lower().replace("-", "_")
+            if access == "rw":
+                access = "read_write"
+        else:
+            name = str(raw_entry).strip()
+        if not name:
+            raise ValueError(f"{prefix}.pin_bindings[{idx}] requires a non-empty name")
+        if access not in PIN_BINDING_ACCESSES:
+            raise ValueError(
+                f"{prefix}.pin_bindings[{idx}].access must be one of "
+                f"{', '.join(sorted(PIN_BINDING_ACCESSES))}"
+            )
+        bindings.append({"name": name, "access": access})
+    return bindings
+
+
 def build_one_app_supervisor(
     app_key: str,
     raw: dict,
@@ -416,10 +442,18 @@ def build_one_app_supervisor(
         raise ValueError(f"{prefix}.env must be a mapping")
     app_env = {str(key): str(value) for key, value in raw_env.items()}
 
-    raw_pin_bindings = raw.get("pin_bindings") or []
-    if not isinstance(raw_pin_bindings, list):
-        raise ValueError(f"{prefix}.pin_bindings must be a list")
-    pin_infos = resolver.resolve_names(raw_pin_bindings)
+    pin_binding_entries = parse_pin_binding_entries(raw.get("pin_bindings") or [], prefix=prefix)
+    pin_bindings: list[dict[str, object]] = []
+    for entry in pin_binding_entries:
+        handle = resolver.handle_for_name(entry["name"])
+        info = resolver.describe_handle(handle)
+        pin_bindings.append(
+            {
+                "name": info.name,
+                "handle": info.handle,
+                "access": entry["access"],
+            }
+        )
 
     raw_gpio_bindings = raw.get("gpio_bindings") or []
     if not isinstance(raw_gpio_bindings, list):
@@ -441,7 +475,7 @@ def build_one_app_supervisor(
         "OGM_PI_BOARD_ID": str(pinmap.raw.get("id", "")),
         "OGM_PI_BOARD_NAME": str(pinmap.raw.get("label", "")),
         "OGM_PI_PIN_BINDINGS": json.dumps(
-            [{"name": info.name, "handle": info.handle} for info in pin_infos],
+            pin_bindings,
             separators=(",", ":"),
         ),
         "OGM_PI_GPIO_BINDINGS": json.dumps(gpio_handles, separators=(",", ":")),
@@ -469,7 +503,7 @@ def build_one_app_supervisor(
         "owner": owner,
         "apps_dir": str(apps_dir),
         "cwd": resolved_cwd,
-        "pin_bindings": [{"name": info.name, "handle": info.handle} for info in pin_infos],
+        "pin_bindings": pin_bindings,
         "gpio_bindings": gpio_handles,
     }
     return supervisor, meta
@@ -491,6 +525,7 @@ def build_app_supervisors(
 
     supervisors: dict[str, AppSupervisor] = {}
     metas: list[dict[str, object]] = []
+    write_owner_by_handle: dict[int, tuple[str, str]] = {}
     for raw_key, raw_app in raw_apps.items():
         app_key = str(raw_key)
         if not isinstance(raw_app, dict):
@@ -507,6 +542,21 @@ def build_app_supervisors(
         if supervisor is None or meta is None:
             continue
         name = str(meta.get("name") or app_key)
+        for binding in meta.get("pin_bindings", []):
+            if not isinstance(binding, dict):
+                continue
+            if str(binding.get("access") or "read_write") not in {"write", "read_write"}:
+                continue
+            handle = int(binding.get("handle"))
+            pin_name = str(binding.get("name") or handle)
+            existing = write_owner_by_handle.get(handle)
+            if existing is not None and existing[0] != name:
+                raise ValueError(
+                    "pin binding write conflict: "
+                    f"apps.{existing[0]} and apps.{name} both declare writable access to {pin_name} "
+                    f"(handle {handle}). Use access: read for shared observers."
+                )
+            write_owner_by_handle[handle] = (name, pin_name)
         supervisors[name] = supervisor
         metas.append(meta)
     return MultiAppSupervisor(supervisors), metas
@@ -615,6 +665,8 @@ def main() -> int:
 
     if app_supervisors:
         server.set_app_reload_handler(app_supervisors.reload)
+        server.set_app_identity_resolver(app_supervisors.resolve_peer_app)
+        server.set_app_access_policy(AppAccessPolicy.from_app_metas(app_metas))
         LOGGER.info(
             "App supervision enabled: count=%s names=%s",
             len(app_metas),

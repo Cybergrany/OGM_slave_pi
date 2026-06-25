@@ -45,12 +45,17 @@ def make_pinmap() -> PinMap:
     return PinMap(raw=raw, pins=pins, pins_by_name={pin.name: pin for pin in pins})
 
 
-def make_app(name: str, *, gpio_bindings: list[str] | None = None) -> dict:
+def make_app(
+    name: str,
+    *,
+    pin_bindings: list[object] | None = None,
+    gpio_bindings: list[str] | None = None,
+) -> dict:
     return {
         "enabled": True,
         "name": name,
         "command": "python3 -c 'import time; time.sleep(1)'",
-        "pin_bindings": [],
+        "pin_bindings": list(pin_bindings or []),
         "gpio_bindings": list(gpio_bindings or []),
         "env": {},
     }
@@ -115,6 +120,44 @@ class AppSupervisorBuildTest(unittest.TestCase):
                 apps_dir="/opt/OGM_slave_pi/apps",
             )
         self.assertIn("already claimed by app:camera", str(ctx.exception))
+
+    def test_writable_pin_binding_conflict_fails_loudly(self) -> None:
+        pinmap = make_pinmap()
+        with self.assertRaises(ValueError) as ctx:
+            build_app_supervisors(
+                {
+                    "apps": {
+                        "camera": make_app("camera", pin_bindings=["GPIO_A"]),
+                        "audio": make_app("audio", pin_bindings=["GPIO_A"]),
+                    }
+                },
+                pinmap=pinmap,
+                resolver=PinResolver(pinmap),
+                gpio_claims=GpioClaimRegistry(),
+                socket_path="/tmp/ogm_pi.sock",
+                apps_dir="/opt/OGM_slave_pi/apps",
+            )
+        self.assertIn("pin binding write conflict", str(ctx.exception))
+        self.assertIn("Use access: read", str(ctx.exception))
+
+    def test_read_only_pin_binding_can_be_shared(self) -> None:
+        pinmap = make_pinmap()
+        supervisors, metas = build_app_supervisors(
+            {
+                "apps": {
+                    "camera": make_app("camera", pin_bindings=[{"name": "GPIO_A", "access": "read"}]),
+                    "audio": make_app("audio", pin_bindings=[{"name": "GPIO_A", "access": "read"}]),
+                }
+            },
+            pinmap=pinmap,
+            resolver=PinResolver(pinmap),
+            gpio_claims=GpioClaimRegistry(),
+            socket_path="/tmp/ogm_pi.sock",
+            apps_dir="/opt/OGM_slave_pi/apps",
+        )
+
+        self.assertEqual(supervisors.names, ["camera", "audio"])
+        self.assertEqual(metas[0]["pin_bindings"][0]["access"], "read")
 
 
 class FakeSupervisor:

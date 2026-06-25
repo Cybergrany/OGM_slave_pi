@@ -120,6 +120,14 @@ Child app environment injected by daemon:
 - `OGM_PI_PIN_BINDINGS` (JSON array of `{name,handle}`)
 - `OGM_PI_GPIO_BINDINGS` (JSON array of `{name,handle,line}`)
 
+Supervised app IPC is scoped by process identity. A child app can only read or
+write handles declared in its own `pin_bindings`, and can only use GPIO handles
+declared in its own `gpio_bindings`. Plain string `pin_bindings` are writable
+for compatibility. To share a register for observation without creating a
+multi-writer conflict, use `pin_bindings: [{name: SomePin, access: read}]`.
+If two enabled apps both declare writable access to the same pin, daemon startup
+fails loudly and names the conflicting apps.
+
 6) **Run the daemon**:
 ```bash
 python3 -m ogm_pi.daemon --config config/ogm_pi.yaml
