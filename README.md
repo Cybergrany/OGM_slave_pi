@@ -82,29 +82,36 @@ Example:
 pinmap: /etc/ogm_pi/pinmap.json
 custom_types_dir: /opt/OGM_slave_pi/custom_types
 apps_dir: /opt/OGM_slave_pi/apps
+app_config_version: 2
 serial: /dev/serial0
 baud: 250000
 slave_address: 99
 gpio_chip: /dev/gpiochip0
 modbus_log_every_failure: false
 modbus_show_all_frames: false
-app:
-  enabled: false
-  name: default
-  command: ""
-  # Optional. If blank, daemon uses "<apps_dir>/<app.name>".
-  cwd: ""
-  restart_policy: always
-  restart_backoff_ms: 2000
-  startup_timeout_ms: 10000
-  shutdown_timeout_ms: 5000
-  # Pin names resolved once to handles and passed to child app via env.
-  pin_bindings: []
-  # Pin names that map to GPIO lines this app may access through IPC.
-  gpio_bindings: []
-  env: {}
+apps:
+  cctv_station:
+    enabled: true
+    name: cctv_station
+    command: "python3 scripts/run_kiosk.py"
+    # Optional. If blank, daemon uses "<apps_dir>/<app.name>".
+    cwd: ""
+    restart_policy: always
+    restart_backoff_ms: 2000
+    startup_timeout_ms: 10000
+    shutdown_timeout_ms: 5000
+    # Pin names resolved once to handles and passed to this child app via env.
+    pin_bindings: []
+    # Pin names that map to GPIO lines this app may access through IPC.
+    gpio_bindings: []
+    env: {}
 ```
 For USB adapters instead of GPIO14/15 UART, use `serial: /dev/ttyUSB0` (or your adapter path).
+
+`app_config_version: 2` and `apps:` are mandatory. A legacy top-level `app:`
+block is rejected at daemon startup with an instruction to run a full runtime
+upgrade/install, because mixed supervisor/runtime versions are intentionally
+not supported.
 
 Child app environment injected by daemon:
 - `OGM_PI_SOCKET_PATH`
@@ -145,7 +152,7 @@ Supported commands:
 - `resolve` (resolve pin names to stable integer handles)
 - `get_many` / `set_many` (batch read/write by handle)
 - `gpio_read` / `gpio_write` (GPIO by handle; app-claimed lines only)
-- `app_reload` (restart configured child app process without daemon restart)
+- `app_reload` (restart all configured child apps, or one named child app, without daemon restart)
 - `subscribe` (stream events: `change`, `board_reset`)
 
 Examples:
@@ -156,6 +163,7 @@ python3 -m ogm_pi.cli set LightRelay --type coils --value 1
 python3 -m ogm_pi.cli resolve DoorSensor LightRelay
 python3 -m ogm_pi.cli get-many 1 2
 python3 -m ogm_pi.cli app-reload
+python3 -m ogm_pi.cli app-reload cctv_station
 python3 -m ogm_pi.cli schema
 ```
 

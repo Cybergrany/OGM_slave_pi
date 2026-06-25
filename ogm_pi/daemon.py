@@ -20,7 +20,7 @@ from pathlib import Path
 
 import yaml
 
-from .app_supervisor import AppConfig, AppSupervisor
+from .app_supervisor import AppConfig, AppSupervisor, MultiAppSupervisor
 from .gpio_claims import GpioClaimError, GpioClaimRegistry
 from .ipc_server import IPCServer
 from .gpio import LibgpiodAdapter, NullGpioAdapter
@@ -34,6 +34,11 @@ LOGGER = logging.getLogger(__name__)
 
 
 DEFAULT_CONFIG_PATH = "/etc/ogm_pi/ogm_pi.yaml"
+APP_CONFIG_VERSION = 2
+APP_CONFIG_UPGRADE_MESSAGE = (
+    "Incompatible OGM_slave_pi app config schema. Legacy single-app config is no longer supported. "
+    "Run a full OGM_slave_pi runtime upgrade/install so app_config_version: 2 and apps: are generated."
+)
 DEFAULT_SETTINGS = {
     "pinmap": None,
     "custom_types_dir": None,
@@ -56,7 +61,8 @@ DEFAULT_SETTINGS = {
     "modbus_fail_open": False,
     "modbus_log_every_failure": False,
     "modbus_show_all_frames": False,
-    "app": None,
+    "app_config_version": APP_CONFIG_VERSION,
+    "apps": {},
 }
 
 
@@ -130,6 +136,35 @@ def load_config(path: str) -> dict:
     if not isinstance(data, dict):
         raise ConfigLoadError(f"config {path} must be a mapping")
     return data
+
+
+def validate_app_config_schema(config: dict, *, source: str = "config") -> None:
+    """Validate the v2 app config shape before runtime starts."""
+    if "app" in config:
+        raise ConfigLoadError(f"{APP_CONFIG_UPGRADE_MESSAGE} Found legacy top-level app in {source}.")
+
+    actual_version = config.get("app_config_version")
+    if actual_version != APP_CONFIG_VERSION:
+        raise ConfigLoadError(
+            f"{APP_CONFIG_UPGRADE_MESSAGE} Expected app_config_version: {APP_CONFIG_VERSION}, "
+            f"got {actual_version!r} in {source}."
+        )
+
+    apps = config.get("apps")
+    if not isinstance(apps, dict):
+        raise ConfigLoadError(f"{APP_CONFIG_UPGRADE_MESSAGE} apps must be a mapping keyed by app name in {source}.")
+
+    for raw_key, raw_app in apps.items():
+        key = str(raw_key)
+        if not isinstance(raw_app, dict):
+            raise ConfigLoadError(f"{APP_CONFIG_UPGRADE_MESSAGE} apps.{key} must be a mapping.")
+        name = str(raw_app.get("name") or "").strip()
+        if not name:
+            raise ConfigLoadError(f"{APP_CONFIG_UPGRADE_MESSAGE} apps.{key}.name is required.")
+        if name != key:
+            raise ConfigLoadError(
+                f"{APP_CONFIG_UPGRADE_MESSAGE} App key/name mismatch: apps.{key}.name is {name!r}."
+            )
 
 
 def build_settings(config: dict, cli: argparse.Namespace) -> dict:
@@ -352,8 +387,9 @@ def configure_logging(level: str, *, failure_log: str | None = None) -> None:
             root.warning("Could not open failure log at %s: %s", failure_log, exc)
 
 
-def build_app_supervisor(
-    settings: dict,
+def build_one_app_supervisor(
+    app_key: str,
+    raw: dict,
     *,
     pinmap: PinMap,
     resolver: PinResolver,
@@ -361,43 +397,40 @@ def build_app_supervisor(
     socket_path: str,
     apps_dir: str,
 ) -> tuple[Optional[AppSupervisor], Optional[dict[str, object]]]:
-    """Build and validate optional child-app supervision config."""
-    raw = settings.get("app")
-    if raw in (None, "", False):
-        return None, None
-    if not isinstance(raw, dict):
-        raise ValueError("app config must be a mapping")
-
+    """Build and validate one child-app supervision config."""
+    prefix = f"apps.{app_key}"
     enabled = as_bool(raw.get("enabled", False), default=False)
     if not enabled:
         return None, None
 
-    name = str(raw.get("name") or "default").strip() or "default"
+    name = str(raw.get("name") or "").strip()
+    if not name:
+        raise ValueError(f"{prefix}.name is required")
     owner = f"app:{name}"
     command = raw.get("command")
     if not command:
-        raise ValueError("app.enabled=true requires app.command")
+        raise ValueError(f"{prefix}.enabled=true requires {prefix}.command")
 
     raw_env = raw.get("env") or {}
     if not isinstance(raw_env, dict):
-        raise ValueError("app.env must be a mapping")
+        raise ValueError(f"{prefix}.env must be a mapping")
     app_env = {str(key): str(value) for key, value in raw_env.items()}
 
     raw_pin_bindings = raw.get("pin_bindings") or []
     if not isinstance(raw_pin_bindings, list):
-        raise ValueError("app.pin_bindings must be a list")
+        raise ValueError(f"{prefix}.pin_bindings must be a list")
     pin_infos = resolver.resolve_names(raw_pin_bindings)
 
     raw_gpio_bindings = raw.get("gpio_bindings") or []
     if not isinstance(raw_gpio_bindings, list):
-        raise ValueError("app.gpio_bindings must be a list")
+        raise ValueError(f"{prefix}.gpio_bindings must be a list")
     gpio_handles: list[dict[str, object]] = []
     for raw_name in raw_gpio_bindings:
         pin_name = str(raw_name)
         handle = resolver.handle_for_name(pin_name)
         line = resolver.gpio_line_for_handle(handle)
         if line is None:
-            raise ValueError(f"GPIO binding pin '{pin_name}' does not map to a concrete GPIO line")
+            raise ValueError(f"{prefix}.gpio_bindings pin '{pin_name}' does not map to a concrete GPIO line")
         gpio_claims.claim_line(owner, line)
         gpio_handles.append({"name": pin_name, "handle": handle, "line": line})
 
@@ -442,12 +475,50 @@ def build_app_supervisor(
     return supervisor, meta
 
 
+def build_app_supervisors(
+    settings: dict,
+    *,
+    pinmap: PinMap,
+    resolver: PinResolver,
+    gpio_claims: GpioClaimRegistry,
+    socket_path: str,
+    apps_dir: str,
+) -> tuple[MultiAppSupervisor, list[dict[str, object]]]:
+    """Build and validate all configured child-app supervisors."""
+    raw_apps = settings.get("apps")
+    if not isinstance(raw_apps, dict):
+        raise ValueError("apps must be a mapping keyed by app name")
+
+    supervisors: dict[str, AppSupervisor] = {}
+    metas: list[dict[str, object]] = []
+    for raw_key, raw_app in raw_apps.items():
+        app_key = str(raw_key)
+        if not isinstance(raw_app, dict):
+            raise ValueError(f"apps.{app_key} must be a mapping")
+        supervisor, meta = build_one_app_supervisor(
+            app_key,
+            raw_app,
+            pinmap=pinmap,
+            resolver=resolver,
+            gpio_claims=gpio_claims,
+            socket_path=socket_path,
+            apps_dir=apps_dir,
+        )
+        if supervisor is None or meta is None:
+            continue
+        name = str(meta.get("name") or app_key)
+        supervisors[name] = supervisor
+        metas.append(meta)
+    return MultiAppSupervisor(supervisors), metas
+
+
 def main() -> int:
     """CLI entry point for running the daemon."""
     args = parse_args()
     config_path = getattr(args, "config", DEFAULT_CONFIG_PATH)
     try:
         config = load_config(config_path)
+        validate_app_config_schema(config, source=str(config_path))
     except ConfigLoadError as exc:
         fallback_dump_dir = (
             os.environ.get("OGM_PI_CRASH_DUMP_DIR")
@@ -526,10 +597,10 @@ def main() -> int:
         event_sink=server.publish_events,
     )
 
-    app_supervisor: Optional[AppSupervisor] = None
-    app_meta: Optional[dict[str, object]] = None
+    app_supervisors = MultiAppSupervisor({})
+    app_metas: list[dict[str, object]] = []
     try:
-        app_supervisor, app_meta = build_app_supervisor(
+        app_supervisors, app_metas = build_app_supervisors(
             settings,
             pinmap=pinmap,
             resolver=resolver,
@@ -540,17 +611,23 @@ def main() -> int:
     except GpioClaimError as exc:
         raise SystemExit(f"ogm_pi: app GPIO claim failed: {exc}") from exc
     except Exception as exc:
-        raise SystemExit(f"ogm_pi: invalid app config: {exc}") from exc
+        raise SystemExit(f"ogm_pi: invalid apps config: {exc}") from exc
 
-    if app_supervisor is not None:
-        server.set_app_reload_handler(app_supervisor.reload)
+    if app_supervisors:
+        server.set_app_reload_handler(app_supervisors.reload)
         LOGGER.info(
-            "App supervision enabled (%s): cwd=%s, %s pin bindings, %s gpio bindings",
-            app_meta.get("name", "default") if isinstance(app_meta, dict) else "default",
-            app_meta.get("cwd", "") if isinstance(app_meta, dict) else "",
-            len(app_meta.get("pin_bindings", [])) if isinstance(app_meta, dict) else 0,
-            len(app_meta.get("gpio_bindings", [])) if isinstance(app_meta, dict) else 0,
+            "App supervision enabled: count=%s names=%s",
+            len(app_metas),
+            ",".join(app_supervisors.names),
         )
+        for app_meta in app_metas:
+            LOGGER.info(
+                "App supervision configured (%s): cwd=%s, %s pin bindings, %s gpio bindings",
+                app_meta.get("name", ""),
+                app_meta.get("cwd", ""),
+                len(app_meta.get("pin_bindings", [])),
+                len(app_meta.get("gpio_bindings", [])),
+            )
 
     slave_address = settings.get("slave_address")
     if slave_address is None:
@@ -624,12 +701,12 @@ def main() -> int:
     runtime.start()
     LOGGER.info("IPC child-app startup gate enabled")
     ipc_ready = wait_for_ipc_ready(str(settings["socket_path"]), timeout_s=5.0, fatal=False)
-    if app_supervisor is not None:
+    if app_supervisors:
         if ipc_ready:
-            LOGGER.info("Starting child app after IPC readiness confirmation")
+            LOGGER.info("Starting child apps after IPC readiness confirmation")
         else:
-            LOGGER.warning("Starting child app before IPC readiness confirmation; app-side retry will handle reconnects")
-        app_supervisor.start()
+            LOGGER.warning("Starting child apps before IPC readiness confirmation; app-side retry will handle reconnects")
+        app_supervisors.start()
 
     shutdown_once = threading.Event()
 
@@ -643,8 +720,8 @@ def main() -> int:
         server.stop()
         if ipc_thread.is_alive():
             ipc_thread.join(timeout=1.0)
-        if app_supervisor is not None:
-            app_supervisor.stop()
+        if app_supervisors:
+            app_supervisors.stop()
         runtime.stop()
         backend.stop()
         gpio.close()

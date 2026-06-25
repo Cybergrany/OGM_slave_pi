@@ -103,6 +103,28 @@ class SubscribeHarness:
 
 
 class IPCServerEventStreamTest(unittest.TestCase):
+    def test_app_reload_passes_optional_app_name(self) -> None:
+        server = make_server()
+        seen: list[str | None] = []
+        server.set_app_reload_handler(lambda name: seen.append(name) or {"name": name or ""})
+
+        response = server._handle_request({"id": 1, "cmd": "app_reload", "name": "cctv_station"})
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(seen, ["cctv_station"])
+        self.assertEqual(response["app"]["name"], "cctv_station")
+
+    def test_app_reload_without_name_reloads_all(self) -> None:
+        server = make_server()
+        seen: list[str | None] = []
+        server.set_app_reload_handler(lambda name: seen.append(name) or {"scope": "all" if name is None else name})
+
+        response = server._handle_request({"id": 1, "cmd": "app_reload"})
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(seen, [None])
+        self.assertEqual(response["app"]["scope"], "all")
+
     def test_publish_events_assigns_ipc_seq_and_replays_since(self) -> None:
         server = make_server()
         server.publish_events(

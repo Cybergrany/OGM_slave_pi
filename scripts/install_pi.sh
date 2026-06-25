@@ -685,6 +685,7 @@ slave_address: ${slave_line}
 socket_path: ${SOCKET_PATH}
 custom_types_dir: ${CUSTOM_TYPES_DIR}
 apps_dir: ${APPS_DIR}
+app_config_version: 2
 no_modbus: ${NO_MODBUS}
 no_gpio: ${NO_GPIO}
 gpio_chip: ${GPIO_CHIP}
@@ -695,18 +696,7 @@ failure_log: ${TARGET_DIR}/runtime_failures.log
 crash_dump_dir: ${TARGET_DIR}/crash_dumps
 modbus_log_every_failure: false
 modbus_show_all_frames: false
-app:
-  enabled: false
-  name: default
-  command: ""
-  cwd: ${APPS_DIR}/default
-  restart_policy: always
-  restart_backoff_ms: 2000
-  startup_timeout_ms: 10000
-  shutdown_timeout_ms: 5000
-  pin_bindings: []
-  gpio_bindings: []
-  env: {}
+apps: {}
 EOF
 }
 

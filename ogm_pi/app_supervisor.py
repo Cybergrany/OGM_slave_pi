@@ -285,3 +285,59 @@ class AppSupervisor:
         if policy == "on-failure":
             return rc != 0
         return True
+
+
+class MultiAppSupervisor:
+    """Coordinate multiple per-app supervisors through one runtime path."""
+
+    def __init__(self, supervisors: Dict[str, AppSupervisor]) -> None:
+        self._supervisors = dict(supervisors)
+
+    def __bool__(self) -> bool:
+        return bool(self._supervisors)
+
+    @property
+    def names(self) -> list[str]:
+        return list(self._supervisors.keys())
+
+    def start(self) -> None:
+        started: list[AppSupervisor] = []
+        try:
+            for name, supervisor in self._supervisors.items():
+                LOGGER.info("Starting supervised app: %s", name)
+                supervisor.start()
+                started.append(supervisor)
+        except Exception:
+            for supervisor in reversed(started):
+                try:
+                    supervisor.stop()
+                except Exception:
+                    LOGGER.exception("Failed to stop app after multi-app startup error")
+            raise
+
+    def stop(self) -> None:
+        for name, supervisor in reversed(list(self._supervisors.items())):
+            try:
+                LOGGER.info("Stopping supervised app: %s", name)
+                supervisor.stop()
+            except Exception:
+                LOGGER.exception("Failed to stop supervised app: %s", name)
+
+    def reload(self, name: Optional[str] = None) -> Dict[str, object]:
+        target = str(name or "").strip()
+        if target:
+            supervisor = self._supervisors.get(target)
+            if supervisor is None:
+                raise ValueError(f"Unknown app '{target}'")
+            return supervisor.reload()
+
+        results: Dict[str, object] = {}
+        for app_name, supervisor in self._supervisors.items():
+            results[app_name] = supervisor.reload()
+        return {"ok": True, "apps": results}
+
+    def status(self) -> Dict[str, object]:
+        return {
+            "ok": True,
+            "apps": {name: supervisor.status() for name, supervisor in self._supervisors.items()},
+        }

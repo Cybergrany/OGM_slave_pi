@@ -105,7 +105,7 @@ class IPCServer:
         resolver: Optional[PinResolver] = None,
         gpio: Optional[GpioAdapter] = None,
         gpio_claims: Optional[GpioClaimRegistry] = None,
-        app_reload_cb: Optional[Callable[[], Dict[str, Any]]] = None,
+        app_reload_cb: Optional[Callable[[Optional[str]], Dict[str, Any]]] = None,
         event_log_max: int = DEFAULT_EVENT_LOG_MAX,
         subscriber_queue_max: int = DEFAULT_SUBSCRIBER_QUEUE_MAX,
     ) -> None:
@@ -131,7 +131,7 @@ class IPCServer:
         self._startup_error: Optional[str] = None
         self._startup_error_lock = threading.Lock()
 
-    def set_app_reload_handler(self, callback: Optional[Callable[[], Dict[str, Any]]]) -> None:
+    def set_app_reload_handler(self, callback: Optional[Callable[[Optional[str]], Dict[str, Any]]]) -> None:
         self._app_reload_cb = callback
 
     def consume_startup_error(self) -> Optional[str]:
@@ -274,7 +274,7 @@ class IPCServer:
             if cmd == "gpio_write":
                 return self._ok(self._gpio_write(request.get("writes")), request_id)
             if cmd == "app_reload":
-                return self._ok(self._app_reload(), request_id)
+                return self._ok(self._app_reload(request), request_id)
         except Exception as exc:
             LOGGER.exception("IPC request failed")
             return self._error(str(exc), request_id)
@@ -530,10 +530,13 @@ class IPCServer:
             items.append({"handle": handle, "name": pin.name, "line": line, "value": 1 if value else 0})
         return {"items": items}
 
-    def _app_reload(self) -> Dict[str, Any]:
+    def _app_reload(self, request: Dict[str, Any]) -> Dict[str, Any]:
         if self._app_reload_cb is None:
             raise ValueError("App reload is not configured")
-        result = self._app_reload_cb()
+        app_name = request.get("name")
+        if app_name is None:
+            app_name = request.get("app_name")
+        result = self._app_reload_cb(str(app_name) if app_name is not None else None)
         if isinstance(result, dict):
             return {"app": result}
         return {"app": {"result": result}}
