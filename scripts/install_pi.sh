@@ -244,6 +244,28 @@ resolve_cmdline_path() {
   echo ""
 }
 
+file_signature() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    cksum "$file" 2>/dev/null || true
+  else
+    echo "__missing__"
+  fi
+}
+
+mark_reboot_if_file_changed() {
+  local label="$1"
+  local file="$2"
+  local before="$3"
+  local after
+  after="$(file_signature "$file")"
+  if [[ "$after" != "$before" ]]; then
+    UART_REBOOT_REQUIRED="true"
+    UART_FIX_APPLIED="true"
+    echo "raspi-config updated ${label}: ${file}"
+  fi
+}
+
 ensure_boot_key_value() {
   local file="$1"
   local key="$2"
@@ -352,6 +374,7 @@ uart_preflight() {
   fi
 
   local serial_target serial0_target boot_cfg cmdline_cfg getty_active cmdline_console parity_upper dedicate_serial0
+  local boot_sig_before cmdline_sig_before
   serial_target="$(readlink -f "$SERIAL" 2>/dev/null || true)"
   if [[ -z "$serial_target" ]]; then
     serial_target="$SERIAL"
@@ -404,9 +427,24 @@ uart_preflight() {
     fi
 
     echo "Applying UART compatibility fixes (--uart-fix enabled)..."
+    boot_sig_before=""
+    cmdline_sig_before=""
+    if [[ -n "$boot_cfg" ]]; then
+      boot_sig_before="$(file_signature "$boot_cfg")"
+    fi
+    if [[ -n "$cmdline_cfg" ]]; then
+      cmdline_sig_before="$(file_signature "$cmdline_cfg")"
+    fi
+
     if command -v raspi-config >/dev/null 2>&1; then
       raspi-config nonint do_serial_cons 1 || true
       raspi-config nonint do_serial_hw 0 || true
+      if [[ -n "$boot_cfg" ]]; then
+        mark_reboot_if_file_changed "boot config" "$boot_cfg" "$boot_sig_before"
+      fi
+      if [[ -n "$cmdline_cfg" ]]; then
+        mark_reboot_if_file_changed "cmdline" "$cmdline_cfg" "$cmdline_sig_before"
+      fi
     else
       echo "Warning: raspi-config not found; applying file/service based fixes only."
     fi
