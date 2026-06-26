@@ -128,6 +128,11 @@ multi-writer conflict, use `pin_bindings: [{name: SomePin, access: read}]`.
 If two enabled apps both declare writable access to the same pin, daemon startup
 fails loudly and names the conflicting apps.
 
+Each supervised app runs in a dedicated process group. App reload, daemon
+shutdown, and unexpected app-wrapper exit terminate the complete process tree
+before restart. This is required for wrappers that launch compositors or media
+workers; descendants must not survive and retain DRM, GPIO, or audio resources.
+
 6) **Run the daemon**:
 ```bash
 python3 -m ogm_pi.daemon --config config/ogm_pi.yaml

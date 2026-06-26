@@ -1,6 +1,8 @@
+import signal
 import unittest
+from unittest import mock
 
-from ogm_pi.app_supervisor import MultiAppSupervisor
+from ogm_pi.app_supervisor import AppConfig, AppSupervisor, MultiAppSupervisor
 from ogm_pi.daemon import (
     APP_CONFIG_UPGRADE_MESSAGE,
     ConfigLoadError,
@@ -158,6 +160,38 @@ class AppSupervisorBuildTest(unittest.TestCase):
 
         self.assertEqual(supervisors.names, ["camera", "audio"])
         self.assertEqual(metas[0]["pin_bindings"][0]["access"], "read")
+
+
+class AppSupervisorProcessGroupTest(unittest.TestCase):
+    def test_spawn_creates_dedicated_process_session(self) -> None:
+        supervisor = AppSupervisor(
+            AppConfig(enabled=True, name="camera", command="python3 app.py", startup_timeout_ms=0)
+        )
+        proc = mock.Mock(pid=1234, stdout=None, stderr=None)
+        with mock.patch("ogm_pi.app_supervisor.subprocess.Popen", return_value=proc) as popen:
+            supervisor._spawn_locked(reason="test")
+
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
+    def test_stop_targets_entire_process_group(self) -> None:
+        supervisor = AppSupervisor(
+            AppConfig(enabled=True, name="camera", command="python3 app.py", shutdown_timeout_ms=500)
+        )
+        proc = mock.Mock(pid=4321)
+        proc.poll.return_value = None
+        signals: list[tuple[int, int]] = []
+
+        def fake_killpg(pgid: int, sig: int) -> None:
+            signals.append((pgid, sig))
+            if sig == 0:
+                raise ProcessLookupError
+
+        with mock.patch("ogm_pi.app_supervisor.os.killpg", side_effect=fake_killpg):
+            supervisor._stop_process_group(proc, reason="test", timeout_s=0.5)
+
+        self.assertEqual(signals[0], (4321, signal.SIGTERM))
+        self.assertNotIn((4321, signal.SIGKILL), signals)
+        proc.wait.assert_called_once()
 
 
 class FakeSupervisor:

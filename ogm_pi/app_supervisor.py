@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -216,8 +217,49 @@ class AppSupervisor:
             stderr=subprocess.PIPE,
             bufsize=1,
             text=True,
+            start_new_session=True,
         )
         self._start_output_pumps_locked(self._process)
+
+    @staticmethod
+    def _process_group_exists(pgid: int) -> bool:
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def _stop_process_group(self, proc: subprocess.Popen[str], *, reason: str, timeout_s: float) -> None:
+        pgid = proc.pid
+        LOGGER.info("Stopping app process group (%s) pgid=%s", reason, pgid)
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+
+        deadline = time.monotonic() + max(timeout_s, 0.0)
+        if proc.poll() is None:
+            try:
+                proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+        while self._process_group_exists(pgid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not self._process_group_exists(pgid):
+            return
+
+        LOGGER.warning("App process group did not exit in time; killing pgid=%s", pgid)
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        if proc.poll() is None:
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                LOGGER.error("App process leader remained after SIGKILL pid=%s", proc.pid)
 
     def _stop_process_locked(self, *, reason: str) -> None:
         proc = self._process
@@ -225,16 +267,8 @@ class AppSupervisor:
             return
 
         timeout_s = max(int(self.config.shutdown_timeout_ms), 0) / 1000.0
-        LOGGER.info("Stopping app process (%s) pid=%s", reason, proc.pid)
         try:
-            proc.terminate()
-            proc.wait(timeout=timeout_s if timeout_s > 0 else None)
-        except subprocess.TimeoutExpired:
-            LOGGER.warning("App process did not exit in time; killing pid=%s", proc.pid)
-            proc.kill()
-            proc.wait(timeout=2.0)
-        except ProcessLookupError:
-            pass
+            self._stop_process_group(proc, reason=reason, timeout_s=timeout_s)
         finally:
             self._process = None
 
@@ -251,6 +285,9 @@ class AppSupervisor:
             if rc is None:
                 time.sleep(0.2)
                 continue
+
+            cleanup_timeout_s = min(max(int(self.config.shutdown_timeout_ms), 0) / 1000.0, 1.0)
+            self._stop_process_group(proc, reason="leader_exit", timeout_s=cleanup_timeout_s)
 
             suppress = False
             with self._lock:
