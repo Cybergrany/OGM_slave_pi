@@ -35,6 +35,7 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = "/etc/ogm_pi/ogm_pi.yaml"
 APP_CONFIG_VERSION = 2
+SYSTEMD_STOP_OPERATION_TIMEOUT_USEC = 5_000_000
 APP_CONFIG_UPGRADE_MESSAGE = (
     "Incompatible OGM_slave_pi app config schema. Legacy single-app config is no longer supported. "
     "Run a full OGM_slave_pi runtime upgrade/install so app_config_version: 2 and apps: are generated."
@@ -69,6 +70,32 @@ DEFAULT_SETTINGS = {
 
 class ConfigLoadError(ValueError):
     """Raised when daemon config exists but cannot be read/parsed/validated."""
+
+
+def notify_systemd(message: str) -> bool:
+    """Send an sd_notify-compatible message when running under systemd."""
+    address = os.environ.get("NOTIFY_SOCKET", "").strip()
+    if not address:
+        return False
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as notify_socket:
+            notify_socket.connect(address)
+            notify_socket.sendall(message.encode("utf-8"))
+        return True
+    except OSError as exc:
+        LOGGER.warning("Could not notify systemd: %s", exc)
+        return False
+
+
+def extend_systemd_stop_timeout(operation: str) -> None:
+    """Reset systemd's stop deadline for one bounded shutdown operation."""
+    clean_operation = str(operation).replace("\n", " ").strip() or "shutdown"
+    notify_systemd(
+        f"EXTEND_TIMEOUT_USEC={SYSTEMD_STOP_OPERATION_TIMEOUT_USEC}\n"
+        f"STATUS=Stopping OGM Pi: {clean_operation}"
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -768,14 +795,20 @@ def main() -> int:
         shutdown_once.set()
         fatal_event.set()
         LOGGER.info("Shutting down")
+        extend_systemd_stop_timeout("safe_outputs:start")
         runtime.force_safe_outputs("shutdown")
+        extend_systemd_stop_timeout("safe_outputs:complete")
         server.stop()
         if ipc_thread.is_alive():
             ipc_thread.join(timeout=1.0)
+        extend_systemd_stop_timeout("ipc:complete")
         if app_supervisors:
-            app_supervisors.stop()
+            app_supervisors.stop(operation_boundary=extend_systemd_stop_timeout)
+        extend_systemd_stop_timeout("apps:complete")
         runtime.stop()
+        extend_systemd_stop_timeout("pin_runtime:complete")
         backend.stop()
+        extend_systemd_stop_timeout("modbus:complete")
         gpio.close()
 
     signal.signal(signal.SIGTERM, shutdown)

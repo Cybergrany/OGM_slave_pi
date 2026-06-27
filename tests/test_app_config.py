@@ -1,4 +1,7 @@
+import os
 import signal
+import sys
+import time
 import unittest
 from unittest import mock
 
@@ -7,6 +10,7 @@ from ogm_pi.daemon import (
     APP_CONFIG_UPGRADE_MESSAGE,
     ConfigLoadError,
     build_app_supervisors,
+    extend_systemd_stop_timeout,
     validate_app_config_schema,
 )
 from ogm_pi.gpio_claims import GpioClaimError, GpioClaimRegistry
@@ -193,11 +197,45 @@ class AppSupervisorProcessGroupTest(unittest.TestCase):
         self.assertNotIn((4321, signal.SIGKILL), signals)
         proc.wait.assert_called_once()
 
+    def test_reloaded_process_keeps_restart_policy(self) -> None:
+        supervisor = AppSupervisor(
+            AppConfig(
+                enabled=True,
+                name="camera",
+                command=f"{sys.executable} -c 'import time; time.sleep(60)'",
+                restart_policy="always",
+                restart_backoff_ms=0,
+                startup_timeout_ms=0,
+                shutdown_timeout_ms=500,
+            )
+        )
+        supervisor.start()
+        try:
+            reloaded = supervisor.reload()
+            reloaded_pid = int(reloaded["pid"])
+            os.killpg(reloaded_pid, signal.SIGTERM)
+
+            deadline = time.monotonic() + 3.0
+            restarted_pid = None
+            while time.monotonic() < deadline:
+                status = supervisor.status()
+                candidate = status.get("pid")
+                if status.get("alive") and candidate not in {None, reloaded_pid}:
+                    restarted_pid = int(candidate)
+                    break
+                time.sleep(0.02)
+
+            self.assertIsNotNone(restarted_pid)
+            self.assertGreaterEqual(supervisor.status()["restart_count"], 1)
+        finally:
+            supervisor.stop()
+
 
 class FakeSupervisor:
     def __init__(self, name: str) -> None:
         self.name = name
         self.reload_count = 0
+        self.stop_count = 0
 
     def reload(self) -> dict:
         self.reload_count += 1
@@ -205,6 +243,9 @@ class FakeSupervisor:
 
     def status(self) -> dict:
         return {"name": self.name}
+
+    def stop(self) -> None:
+        self.stop_count += 1
 
 
 class MultiAppSupervisorTest(unittest.TestCase):
@@ -226,6 +267,36 @@ class MultiAppSupervisorTest(unittest.TestCase):
         supervisor = MultiAppSupervisor({})
         with self.assertRaises(ValueError):
             supervisor.reload("missing")
+
+    def test_stop_resets_operation_timeout_around_each_app(self) -> None:
+        camera = FakeSupervisor("camera")
+        audio = FakeSupervisor("audio")
+        boundaries: list[str] = []
+        supervisor = MultiAppSupervisor({"camera": camera, "audio": audio})  # type: ignore[arg-type]
+
+        supervisor.stop(operation_boundary=boundaries.append)
+
+        self.assertEqual(camera.stop_count, 1)
+        self.assertEqual(audio.stop_count, 1)
+        self.assertEqual(
+            boundaries,
+            [
+                "stop_app:audio:start",
+                "stop_app:audio:complete",
+                "stop_app:camera:start",
+                "stop_app:camera:complete",
+            ],
+        )
+
+
+class SystemdStopTimeoutTest(unittest.TestCase):
+    def test_extend_stop_timeout_sends_five_second_window(self) -> None:
+        with mock.patch("ogm_pi.daemon.notify_systemd", return_value=True) as notify:
+            extend_systemd_stop_timeout("stop_app:camera:start")
+
+        message = notify.call_args.args[0]
+        self.assertIn("EXTEND_TIMEOUT_USEC=5000000", message)
+        self.assertIn("STATUS=Stopping OGM Pi: stop_app:camera:start", message)
 
 
 if __name__ == "__main__":

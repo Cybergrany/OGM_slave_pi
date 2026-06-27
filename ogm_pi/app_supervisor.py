@@ -12,7 +12,7 @@ import time
 from typing import IO
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,8 +42,6 @@ class AppSupervisor:
         self._stop_event = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
         self._process: Optional[subprocess.Popen[str]] = None
-        self._suppress_restart_once = False
-
         self._restart_count = 0
         self._last_exit_code: Optional[int] = None
         self._last_exit_ts_ms: Optional[int] = None
@@ -134,7 +132,6 @@ class AppSupervisor:
     def stop(self) -> None:
         self._stop_event.set()
         with self._lock:
-            self._suppress_restart_once = True
             self._stop_process_locked(reason="stop")
         thread = self._monitor_thread
         if thread is not None:
@@ -144,7 +141,6 @@ class AppSupervisor:
         if not self.config.enabled:
             raise RuntimeError("App reload requested but app.enabled=false")
         with self._lock:
-            self._suppress_restart_once = True
             self._stop_process_locked(reason="reload")
             self._spawn_locked(reason="reload")
             pid = self._process.pid if self._process is not None else None
@@ -289,19 +285,14 @@ class AppSupervisor:
             cleanup_timeout_s = min(max(int(self.config.shutdown_timeout_ms), 0) / 1000.0, 1.0)
             self._stop_process_group(proc, reason="leader_exit", timeout_s=cleanup_timeout_s)
 
-            suppress = False
             with self._lock:
-                if proc is self._process:
-                    self._process = None
+                if proc is not self._process:
+                    continue
+                self._process = None
                 self._last_exit_code = int(rc)
                 self._last_exit_ts_ms = int(time.time() * 1000)
-                suppress = self._suppress_restart_once
-                if suppress:
-                    self._suppress_restart_once = False
 
             if self._stop_event.is_set():
-                continue
-            if suppress:
                 continue
 
             should_restart = self._should_restart(rc)
@@ -359,13 +350,18 @@ class MultiAppSupervisor:
                     LOGGER.exception("Failed to stop app after multi-app startup error")
             raise
 
-    def stop(self) -> None:
+    def stop(self, *, operation_boundary: Optional[Callable[[str], None]] = None) -> None:
         for name, supervisor in reversed(list(self._supervisors.items())):
+            if operation_boundary is not None:
+                operation_boundary(f"stop_app:{name}:start")
             try:
                 LOGGER.info("Stopping supervised app: %s", name)
                 supervisor.stop()
             except Exception:
                 LOGGER.exception("Failed to stop supervised app: %s", name)
+            else:
+                if operation_boundary is not None:
+                    operation_boundary(f"stop_app:{name}:complete")
 
     def reload(self, name: Optional[str] = None) -> Dict[str, object]:
         target = str(name or "").strip()
