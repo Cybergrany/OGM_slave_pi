@@ -32,7 +32,8 @@ def parse_args() -> argparse.Namespace:
 
     sub.add_parser("list", help="List available pins")
     sub.add_parser("schema", help="Return the full pinmap JSON")
-    sub.add_parser("app-reload", help="Reload the configured child app process")
+    app_reload_cmd = sub.add_parser("app-reload", help="Reload all child apps, or one named child app")
+    app_reload_cmd.add_argument("name", nargs="?", help="Optional app name to reload")
 
     get_cmd = sub.add_parser("get", help="Get register values for a pin")
     get_cmd.add_argument("name", help="Pin name")
@@ -92,6 +93,8 @@ def main() -> None:
         request["handles"] = [int(h, 0) for h in args.handles]
     elif args.cmd == "app-reload":
         request["cmd"] = "app_reload"
+        if args.name:
+            request["name"] = args.name
 
     response = send_request(request, args.socket)
     print(json.dumps(response, indent=2))

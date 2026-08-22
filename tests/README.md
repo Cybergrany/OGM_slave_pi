@@ -42,24 +42,27 @@ python3 scripts/deploy_slave_pi.py
 
 Use action `install` (first deploy) or `sync app` (hotload updates).
 
-2. Configure app block on Pi (`/home/<ssh-user>/Desktop/OGM_slave_pi/config/ogm_pi.yaml`):
+2. Configure app entry on Pi (`/home/<ssh-user>/Desktop/OGM_slave_pi/config/ogm_pi.yaml`):
 
 ```yaml
 apps_dir: /home/<ssh-user>/Desktop/OGM_slave_pi/runtime/apps
-app:
-  enabled: true
-  name: gui_hook_test
-  command: "python3 gui_hook_test_app.py"
-  cwd: ""
-  restart_policy: always
-  restart_backoff_ms: 1000
-  startup_timeout_ms: 10000
-  shutdown_timeout_ms: 5000
-  pin_bindings:
-    - <writable_non_admin_pin_name>
-  gpio_bindings:
-    - <app_claimable_gpio_pin_name>
-  env: {}
+app_config_version: 2
+apps:
+  gui_hook_test:
+    enabled: true
+    name: gui_hook_test
+    command: "python3 gui_hook_test_app.py"
+    cwd: ""
+    restart_policy: always
+    restart_backoff_ms: 1000
+    startup_timeout_ms: 10000
+    shutdown_timeout_ms: 5000
+    pin_bindings:
+      - <writable_non_admin_pin_name>
+      - { name: <shared_read_only_pin_name>, access: read }
+    gpio_bindings:
+      - <app_claimable_gpio_pin_name>
+    env: {}
 ```
 
 Binding details (using `pi_pizza_right` as an example):
@@ -68,8 +71,9 @@ Binding details (using `pi_pizza_right` as an example):
   - pin names resolved once at app startup and injected as `OGM_PI_PIN_BINDINGS`
     (`[{name,handle}, ...]`).
   - use for IPC `resolve`, `get_many`, and `set_many`.
-  - can include both read and write pins, but avoid admin/safety pins unless
-    you explicitly want to exercise them.
+  - plain string entries are writable; use `{name: SomePin, access: read}` for
+    shared observation without write ownership.
+  - the runtime rejects two enabled apps with writable access to the same pin.
 - `gpio_bindings`:
   - subset of pin names that map to real GPIO lines and are injected as
     `OGM_PI_GPIO_BINDINGS` (`[{name,handle,line}, ...]`).
@@ -79,13 +83,14 @@ Binding details (using `pi_pizza_right` as an example):
 `pi_pizza_right` safe baseline (current sample as defined in `ExternalIODefines.yaml`):
 
 ```yaml
-app:
-  pin_bindings:
-    - button_lts
-    - led_outer_R
-    - led_inner_B
-    - RESET
-  gpio_bindings: []
+apps:
+  gui_hook_test:
+    pin_bindings:
+      - button_lts
+      - led_outer_R
+      - led_inner_B
+      - RESET
+    gpio_bindings: []
 ```
 
 Why `gpio_bindings` is empty in this baseline:
@@ -104,13 +109,14 @@ app-owned GPIO pin to the child definition first (example):
 Then bind it:
 
 ```yaml
-app:
-  pin_bindings:
-    - button_lts
-    - app_gpio_probe
-    - RESET
-  gpio_bindings:
-    - app_gpio_probe
+apps:
+  gui_hook_test:
+    pin_bindings:
+      - button_lts
+      - app_gpio_probe
+      - RESET
+    gpio_bindings:
+      - app_gpio_probe
 ```
 
 General notes:
@@ -191,8 +197,9 @@ sudo -u ogm_pi bash -lc '
 1. Disable test app in config:
 
 ```yaml
-app:
-  enabled: false
+apps:
+  gui_hook_test:
+    enabled: false
 ```
 
 2. Restart service:
