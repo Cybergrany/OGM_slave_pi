@@ -7,6 +7,7 @@ import logging
 import os
 import queue
 import socket
+import struct
 import threading
 import time
 from collections import deque
@@ -28,6 +29,75 @@ DEFAULT_SUBSCRIBE_EVENTS = {"change"}
 SUPPORTED_EVENTS = {"change", "board_reset"}
 DEFAULT_EVENT_LOG_MAX = 4096
 DEFAULT_SUBSCRIBER_QUEUE_MAX = 256
+PEER_APP_REQUEST_KEY = "_peer_app_name"
+
+
+@dataclass(frozen=True)
+class AppAccess:
+    """Allowed IPC handles for one supervised app."""
+
+    read_handles: Set[int]
+    write_handles: Set[int]
+    gpio_handles: Set[int]
+
+
+class AppAccessPolicy:
+    """Per-app IPC access map derived from app pin/gpio bindings."""
+
+    def __init__(self, access_by_app: Dict[str, AppAccess]) -> None:
+        self._access_by_app = dict(access_by_app)
+
+    @classmethod
+    def from_app_metas(cls, app_metas: Iterable[Dict[str, Any]]) -> "AppAccessPolicy":
+        access_by_app: Dict[str, AppAccess] = {}
+        for meta in app_metas:
+            name = str(meta.get("name") or "").strip()
+            if not name:
+                continue
+            read_handles: Set[int] = set()
+            write_handles: Set[int] = set()
+            for item in meta.get("pin_bindings") or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    handle = int(item.get("handle"))
+                except (TypeError, ValueError):
+                    continue
+                access = str(item.get("access") or "read_write").strip().lower()
+                if access in {"read", "read_write"}:
+                    read_handles.add(handle)
+                if access in {"write", "read_write"}:
+                    write_handles.add(handle)
+            gpio_handles: Set[int] = set()
+            for item in meta.get("gpio_bindings") or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    gpio_handles.add(int(item.get("handle")))
+                except (TypeError, ValueError):
+                    continue
+            access_by_app[name] = AppAccess(
+                read_handles=read_handles,
+                write_handles=write_handles,
+                gpio_handles=gpio_handles,
+            )
+        return cls(access_by_app)
+
+    def ensure_pin_access(self, app_name: str, handle: int, *, write: bool) -> None:
+        access = self._access_by_app.get(app_name)
+        if access is None:
+            raise ValueError(f"App '{app_name}' has no IPC access policy")
+        allowed = access.write_handles if write else access.read_handles
+        action = "write" if write else "read"
+        if int(handle) not in allowed:
+            raise ValueError(f"App '{app_name}' is not allowed to {action} pin handle {handle}")
+
+    def ensure_gpio_access(self, app_name: str, handle: int) -> None:
+        access = self._access_by_app.get(app_name)
+        if access is None:
+            raise ValueError(f"App '{app_name}' has no IPC access policy")
+        if int(handle) not in access.gpio_handles:
+            raise ValueError(f"App '{app_name}' is not allowed to access GPIO handle {handle}")
 
 
 @dataclass
@@ -105,7 +175,9 @@ class IPCServer:
         resolver: Optional[PinResolver] = None,
         gpio: Optional[GpioAdapter] = None,
         gpio_claims: Optional[GpioClaimRegistry] = None,
-        app_reload_cb: Optional[Callable[[], Dict[str, Any]]] = None,
+        app_reload_cb: Optional[Callable[[Optional[str]], Dict[str, Any]]] = None,
+        app_identity_cb: Optional[Callable[[int], Optional[str]]] = None,
+        app_access_policy: Optional[AppAccessPolicy] = None,
         event_log_max: int = DEFAULT_EVENT_LOG_MAX,
         subscriber_queue_max: int = DEFAULT_SUBSCRIBER_QUEUE_MAX,
     ) -> None:
@@ -116,6 +188,8 @@ class IPCServer:
         self._gpio = gpio
         self._gpio_claims = gpio_claims
         self._app_reload_cb = app_reload_cb
+        self._app_identity_cb = app_identity_cb
+        self._app_access_policy = app_access_policy
         self._event_log_max = max(int(event_log_max), 1)
         self._subscriber_queue_max = max(int(subscriber_queue_max), 1)
 
@@ -131,8 +205,14 @@ class IPCServer:
         self._startup_error: Optional[str] = None
         self._startup_error_lock = threading.Lock()
 
-    def set_app_reload_handler(self, callback: Optional[Callable[[], Dict[str, Any]]]) -> None:
+    def set_app_reload_handler(self, callback: Optional[Callable[[Optional[str]], Dict[str, Any]]]) -> None:
         self._app_reload_cb = callback
+
+    def set_app_identity_resolver(self, callback: Optional[Callable[[int], Optional[str]]]) -> None:
+        self._app_identity_cb = callback
+
+    def set_app_access_policy(self, policy: Optional[AppAccessPolicy]) -> None:
+        self._app_access_policy = policy
 
     def consume_startup_error(self) -> Optional[str]:
         """Return and clear the last fatal startup error, if present."""
@@ -231,6 +311,7 @@ class IPCServer:
 
     def _handle_client(self, conn: socket.socket) -> None:
         """Handle a single client connection (one request per line)."""
+        peer_app_name = self._peer_app_name(conn)
         with conn:
             fileobj = conn.makefile("rb")
             for raw in fileobj:
@@ -241,6 +322,8 @@ class IPCServer:
                 if request is None:
                     conn.sendall(json.dumps({"ok": False, "error": "Invalid JSON"}).encode("utf-8") + b"\n")
                     continue
+                if peer_app_name:
+                    request[PEER_APP_REQUEST_KEY] = peer_app_name
                 if request.get("cmd") == "subscribe":
                     self._handle_subscribe(conn, request)
                     return
@@ -260,21 +343,21 @@ class IPCServer:
             if cmd == "schema":
                 return self._ok(self._pinmap.raw, request_id)
             if cmd == "get":
-                return self._ok(self._get_pin(request.get("name"), request.get("since")), request_id)
+                return self._ok(self._get_pin(request.get("name"), request.get("since"), request=request), request_id)
             if cmd == "set":
-                return self._ok(self._set_pin(request.get("name"), request.get("values")), request_id)
+                return self._ok(self._set_pin(request.get("name"), request.get("values"), request=request), request_id)
             if cmd == "resolve":
-                return self._ok(self._resolve_handles(request.get("names")), request_id)
+                return self._ok(self._resolve_handles(request.get("names"), request=request), request_id)
             if cmd == "get_many":
-                return self._ok(self._get_many(request.get("handles")), request_id)
+                return self._ok(self._get_many(request.get("handles"), request=request), request_id)
             if cmd == "set_many":
-                return self._ok(self._set_many(request.get("writes")), request_id)
+                return self._ok(self._set_many(request.get("writes"), request=request), request_id)
             if cmd == "gpio_read":
-                return self._ok(self._gpio_read(request.get("handles")), request_id)
+                return self._ok(self._gpio_read(request.get("handles"), request=request), request_id)
             if cmd == "gpio_write":
-                return self._ok(self._gpio_write(request.get("writes")), request_id)
+                return self._ok(self._gpio_write(request.get("writes"), request=request), request_id)
             if cmd == "app_reload":
-                return self._ok(self._app_reload(), request_id)
+                return self._ok(self._app_reload(request), request_id)
         except Exception as exc:
             LOGGER.exception("IPC request failed")
             return self._error(str(exc), request_id)
@@ -289,6 +372,7 @@ class IPCServer:
             types = self._parse_types(request.get("types"))
             names = self._parse_names(request.get("names"))
             since_ipc_seq = self._parse_since_ipc_seq(request.get("since_ipc_seq"))
+            self._ensure_app_subscribe_access(request, names)
         except ValueError as exc:
             conn.sendall(json.dumps(self._error(str(exc), request_id)).encode("utf-8") + b"\n")
             return
@@ -454,24 +538,27 @@ class IPCServer:
             )
         return {"pins": pins}
 
-    def _resolve_handles(self, raw_names: Any) -> Dict[str, Any]:
+    def _resolve_handles(self, raw_names: Any, *, request: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not isinstance(raw_names, list):
             raise ValueError("names must be a list")
         infos = self._resolver.resolve_names(raw_names)
+        for info in infos:
+            self._ensure_app_pin_access(request, info.handle, write=False)
         return {"handles": [self._handle_info_to_dict(info) for info in infos]}
 
-    def _get_many(self, raw_handles: Any) -> Dict[str, Any]:
+    def _get_many(self, raw_handles: Any, *, request: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not isinstance(raw_handles, list):
             raise ValueError("handles must be a list")
         with self._state_lock:
             items = []
             for raw in raw_handles:
                 handle = self._coerce_handle(raw)
+                self._ensure_app_pin_access(request, handle, write=False)
                 pin = self._resolver.pin_for_handle(handle)
                 items.append({"handle": handle, "name": pin.name, "values": self._store.get_pin(pin)})
             return {"items": items, "ipc_seq": self._ipc_seq}
 
-    def _set_many(self, raw_writes: Any) -> Dict[str, Any]:
+    def _set_many(self, raw_writes: Any, *, request: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not isinstance(raw_writes, list):
             raise ValueError("writes must be a list")
         with self._state_lock:
@@ -481,6 +568,7 @@ class IPCServer:
                 if not isinstance(entry, dict):
                     raise ValueError("each write entry must be an object")
                 handle = self._coerce_handle(entry.get("handle"))
+                self._ensure_app_pin_access(request, handle, write=True)
                 values = entry.get("values")
                 if not isinstance(values, dict):
                     raise ValueError("write values must be an object of register arrays")
@@ -493,7 +581,7 @@ class IPCServer:
                 self.publish_events(events)
             return {"items": items, "ipc_seq": self._ipc_seq}
 
-    def _gpio_read(self, raw_handles: Any) -> Dict[str, Any]:
+    def _gpio_read(self, raw_handles: Any, *, request: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if self._gpio is None:
             raise ValueError("GPIO is not available")
         if not isinstance(raw_handles, list):
@@ -505,11 +593,11 @@ class IPCServer:
             line = self._resolver.gpio_line_for_handle(handle)
             if line is None:
                 raise ValueError(f"Pin {pin.name} does not map to a GPIO line")
-            self._ensure_app_claimed(line)
+            self._ensure_app_gpio_access(request, handle, line)
             items.append({"handle": handle, "name": pin.name, "line": line, "value": int(self._gpio.read(line))})
         return {"items": items}
 
-    def _gpio_write(self, raw_writes: Any) -> Dict[str, Any]:
+    def _gpio_write(self, raw_writes: Any, *, request: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if self._gpio is None:
             raise ValueError("GPIO is not available")
         if not isinstance(raw_writes, list):
@@ -525,32 +613,110 @@ class IPCServer:
             line = self._resolver.gpio_line_for_handle(handle)
             if line is None:
                 raise ValueError(f"Pin {pin.name} does not map to a GPIO line")
-            self._ensure_app_claimed(line)
+            self._ensure_app_gpio_access(request, handle, line)
             self._gpio.write(line, value)
             items.append({"handle": handle, "name": pin.name, "line": line, "value": 1 if value else 0})
         return {"items": items}
 
-    def _app_reload(self) -> Dict[str, Any]:
+    def _app_reload(self, request: Dict[str, Any]) -> Dict[str, Any]:
         if self._app_reload_cb is None:
             raise ValueError("App reload is not configured")
-        result = self._app_reload_cb()
+        app_name = request.get("name")
+        if app_name is None:
+            app_name = request.get("app_name")
+        result = self._app_reload_cb(str(app_name) if app_name is not None else None)
         if isinstance(result, dict):
             return {"app": result}
         return {"app": {"result": result}}
 
-    def _ensure_app_claimed(self, line: int) -> None:
+    def _peer_app_name(self, conn: socket.socket) -> Optional[str]:
+        if self._app_identity_cb is None:
+            return None
+        pid = self._peer_pid(conn)
+        if pid is None:
+            return None
+        try:
+            return self._app_identity_cb(pid)
+        except Exception as exc:
+            LOGGER.debug("IPC peer app identity lookup failed for pid=%s: %s", pid, exc)
+            return None
+
+    @staticmethod
+    def _peer_pid(conn: socket.socket) -> Optional[int]:
+        try:
+            raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            pid, _uid, _gid = struct.unpack("3i", raw)
+            return int(pid)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _request_app_name(request: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not isinstance(request, dict):
+            return None
+        raw = request.get(PEER_APP_REQUEST_KEY)
+        if raw is None:
+            return None
+        value = str(raw).strip()
+        return value or None
+
+    def _ensure_app_pin_access(
+        self,
+        request: Optional[Dict[str, Any]],
+        handle: int,
+        *,
+        write: bool,
+    ) -> None:
+        app_name = self._request_app_name(request)
+        if app_name is None:
+            return
+        if self._app_access_policy is None:
+            raise ValueError(f"App '{app_name}' has no IPC access policy")
+        self._app_access_policy.ensure_pin_access(app_name, int(handle), write=write)
+
+    def _ensure_app_subscribe_access(self, request: Dict[str, Any], names: Optional[Set[str]]) -> None:
+        app_name = self._request_app_name(request)
+        if app_name is None:
+            return
+        if names is None:
+            raise ValueError(f"App '{app_name}' subscriptions must specify bound pin names")
+        for name in names:
+            handle = self._resolver.handle_for_name(name)
+            self._ensure_app_pin_access(request, handle, write=False)
+
+    def _ensure_app_gpio_access(
+        self,
+        request: Optional[Dict[str, Any]],
+        handle: int,
+        line: int,
+    ) -> None:
+        app_name = self._request_app_name(request)
+        if app_name is not None:
+            if self._app_access_policy is None:
+                raise ValueError(f"App '{app_name}' has no IPC access policy")
+            self._app_access_policy.ensure_gpio_access(app_name, int(handle))
+            if self._gpio_claims is not None:
+                owner = self._gpio_claims.owner_for_line(line)
+                expected_owner = f"app:{app_name}"
+                if owner != expected_owner:
+                    raise ValueError(f"GPIO line {line} is claimed by {owner or 'nobody'}, not {expected_owner}")
+            return
+        self._ensure_any_app_claimed(line)
+
+    def _ensure_any_app_claimed(self, line: int) -> None:
         if self._gpio_claims is None:
             return
         owner = self._gpio_claims.owner_for_line(line)
         if owner is None or not owner.startswith("app:"):
             raise ValueError(f"GPIO line {line} is not app-claimed")
 
-    def _get_pin(self, name: Any, since: Any = None) -> Dict[str, Any]:
+    def _get_pin(self, name: Any, since: Any = None, *, request: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Return register values for a named pin."""
         if not name:
             raise ValueError("Missing pin name")
         with self._state_lock:
             pin = self._pinmap.find_pin(str(name))
+            self._ensure_app_pin_access(request, self._resolver.handle_for_name(pin.name), write=False)
             payload = {"name": pin.name, "values": self._store.get_pin(pin), "ipc_seq": self._ipc_seq}
             if since is not None:
                 try:
@@ -564,7 +730,7 @@ class IPCServer:
                 payload["last_ipc_seq"] = last_ipc_seq
             return payload
 
-    def _set_pin(self, name: Any, values: Any) -> Dict[str, Any]:
+    def _set_pin(self, name: Any, values: Any, *, request: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Set register values for a named pin."""
         if not name:
             raise ValueError("Missing pin name")
@@ -572,6 +738,7 @@ class IPCServer:
             raise ValueError("values must be an object of register arrays")
         with self._state_lock:
             pin = self._pinmap.find_pin(str(name))
+            self._ensure_app_pin_access(request, self._resolver.handle_for_name(pin.name), write=True)
             before = self._store.get_pin(pin)
             updated = self._store.set_pin(pin, values)
             events = self._change_events_from_pin_delta(pin.name, before, updated, source="ipc")

@@ -29,6 +29,10 @@ That helper exports pinmaps from master source-of-truth files, bundles custom
 Pi pin handlers from `OGM_The_Core/Defines/CustomSlaveDefines/slave_pi`,
 uploads the runtime/config payload to the Pi, and runs install or sync actions.
 
+Before an app-only visual/gameplay test, see
+[Desktop App Backup and Rollback](docs/app_backup_rollback.md) for a cold-copy
+procedure that preserves the deployed app, configuration and Python environment.
+
 In Desktop deploy layout (`/home/<user>/Desktop/OGM_slave_pi`), daemon runtime
 logs and crash dumps are persisted under:
 - `runtime_failures.log`
@@ -82,29 +86,36 @@ Example:
 pinmap: /etc/ogm_pi/pinmap.json
 custom_types_dir: /opt/OGM_slave_pi/custom_types
 apps_dir: /opt/OGM_slave_pi/apps
+app_config_version: 2
 serial: /dev/serial0
 baud: 250000
 slave_address: 99
 gpio_chip: /dev/gpiochip0
 modbus_log_every_failure: false
 modbus_show_all_frames: false
-app:
-  enabled: false
-  name: default
-  command: ""
-  # Optional. If blank, daemon uses "<apps_dir>/<app.name>".
-  cwd: ""
-  restart_policy: always
-  restart_backoff_ms: 2000
-  startup_timeout_ms: 10000
-  shutdown_timeout_ms: 5000
-  # Pin names resolved once to handles and passed to child app via env.
-  pin_bindings: []
-  # Pin names that map to GPIO lines this app may access through IPC.
-  gpio_bindings: []
-  env: {}
+apps:
+  cctv_station:
+    enabled: true
+    name: cctv_station
+    command: "python3 scripts/run_kiosk.py"
+    # Optional. If blank, daemon uses "<apps_dir>/<app.name>".
+    cwd: ""
+    restart_policy: always
+    restart_backoff_ms: 2000
+    startup_timeout_ms: 10000
+    shutdown_timeout_ms: 5000
+    # Pin names resolved once to handles and passed to this child app via env.
+    pin_bindings: []
+    # Pin names that map to GPIO lines this app may access through IPC.
+    gpio_bindings: []
+    env: {}
 ```
 For USB adapters instead of GPIO14/15 UART, use `serial: /dev/ttyUSB0` (or your adapter path).
+
+`app_config_version: 2` and `apps:` are mandatory. A legacy top-level `app:`
+block is rejected at daemon startup with an instruction to run a full runtime
+upgrade/install, because mixed supervisor/runtime versions are intentionally
+not supported.
 
 Child app environment injected by daemon:
 - `OGM_PI_SOCKET_PATH`
@@ -112,6 +123,19 @@ Child app environment injected by daemon:
 - `OGM_PI_PINMAP_HASH`, `OGM_PI_BOARD_ID`, `OGM_PI_BOARD_NAME`
 - `OGM_PI_PIN_BINDINGS` (JSON array of `{name,handle}`)
 - `OGM_PI_GPIO_BINDINGS` (JSON array of `{name,handle,line}`)
+
+Supervised app IPC is scoped by process identity. A child app can only read or
+write handles declared in its own `pin_bindings`, and can only use GPIO handles
+declared in its own `gpio_bindings`. Plain string `pin_bindings` are writable
+for compatibility. To share a register for observation without creating a
+multi-writer conflict, use `pin_bindings: [{name: SomePin, access: read}]`.
+If two enabled apps both declare writable access to the same pin, daemon startup
+fails loudly and names the conflicting apps.
+
+Each supervised app runs in a dedicated process group. App reload, daemon
+shutdown, and unexpected app-wrapper exit terminate the complete process tree
+before restart. This is required for wrappers that launch compositors or media
+workers; descendants must not survive and retain DRM, GPIO, or audio resources.
 
 6) **Run the daemon**:
 ```bash
@@ -145,7 +169,7 @@ Supported commands:
 - `resolve` (resolve pin names to stable integer handles)
 - `get_many` / `set_many` (batch read/write by handle)
 - `gpio_read` / `gpio_write` (GPIO by handle; app-claimed lines only)
-- `app_reload` (restart configured child app process without daemon restart)
+- `app_reload` (restart all configured child apps, or one named child app, without daemon restart)
 - `subscribe` (stream events: `change`, `board_reset`)
 
 Examples:
@@ -156,6 +180,7 @@ python3 -m ogm_pi.cli set LightRelay --type coils --value 1
 python3 -m ogm_pi.cli resolve DoorSensor LightRelay
 python3 -m ogm_pi.cli get-many 1 2
 python3 -m ogm_pi.cli app-reload
+python3 -m ogm_pi.cli app-reload cctv_station
 python3 -m ogm_pi.cli schema
 ```
 
@@ -358,6 +383,11 @@ from `ogm_pi.pin_runtime`.
 - BOARD_STATS uptime uses the daemon service lifetime (resets on service restart).
 - BOARD_SHUTDOWN is an edge-triggered admin pin (`1 coil + 1 discrete online flag`): when its coil is set true the daemon clears the coil, sets online false, then runs `sudo -n /usr/local/sbin/ogm_pi_shutdown` (installed by `install_pi.sh`, executes `shutdown now` as root). Wake is not implemented; bring the slave back by external power cycle.
 - GPIO collisions are hard-fail: runtime pin handlers and child apps cannot claim the same line.
+- `INPUT_DIGITAL` uses active-low GPIO input (`pull_up=True`) and supports
+  optional `args: [latch_ms, debounce_ms]`. `latch_ms` is the minimum reported
+  state time for both pressed and released states; `debounce_ms` applies only to
+  rising/pressed transitions. Changing args changes the pin hash, so regenerate
+  and redeploy the matching master/bridge/Pi pinmaps together.
 
 ## Example Raspberry Pi board entry
 
@@ -370,7 +400,7 @@ from `ogm_pi.pin_runtime`.
   reset_on_init: true
   pins:
     # Use Raspberry Pi BCM GPIO numbering.
-    - { name: pi_input_1,  type: INPUT_DIGITAL,  pin: 17 }
+    - { name: pi_input_1,  type: INPUT_DIGITAL,  pin: 17, args: [200, 0] }
     - { name: pi_input_2,  type: INPUT_DIGITAL,  pin: 27 }
     - { name: pi_output_1, type: OUTPUT_DIGITAL, pin: 22, args: [0] }
     - { name: pi_output_2, type: OUTPUT_DIGITAL, pin: 23, args: [0] }
