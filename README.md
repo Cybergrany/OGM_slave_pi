@@ -29,6 +29,10 @@ That helper exports pinmaps from master source-of-truth files, bundles custom
 Pi pin handlers from `OGM_The_Core/Defines/CustomSlaveDefines/slave_pi`,
 uploads the runtime/config payload to the Pi, and runs install or sync actions.
 
+Before an app-only visual/gameplay test, see
+[Desktop App Backup and Rollback](docs/app_backup_rollback.md) for a cold-copy
+procedure that preserves the deployed app, configuration and Python environment.
+
 In Desktop deploy layout (`/home/<user>/Desktop/OGM_slave_pi`), daemon runtime
 logs and crash dumps are persisted under:
 - `runtime_failures.log`
