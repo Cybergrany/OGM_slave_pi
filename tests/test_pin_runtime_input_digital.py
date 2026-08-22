@@ -123,6 +123,28 @@ class InputDigitalTimingTest(unittest.TestCase):
         handler.update(0.152)
         self.assertEqual(read_discrete(store), 0)
 
+    def test_debounce_and_latch_preserve_each_minimum_reported_state_time(self) -> None:
+        handler, store, gpio = make_input([300, 100])
+
+        handler.update(0.0)
+        set_pressed(gpio, True)
+        handler.update(0.050)
+        self.assertEqual(read_discrete(store), 0)
+
+        handler.update(0.151)
+        self.assertEqual(read_discrete(store), 0)
+
+        handler.update(0.301)
+        self.assertEqual(read_discrete(store), 1)
+
+        set_pressed(gpio, False)
+        handler.update(0.400)
+        handler.update(0.600)
+        self.assertEqual(read_discrete(store), 1)
+
+        handler.update(0.602)
+        self.assertEqual(read_discrete(store), 0)
+
     def test_rapid_changes_preserve_minimum_reported_state_time(self) -> None:
         handler, store, gpio = make_input([200, 0])
 
