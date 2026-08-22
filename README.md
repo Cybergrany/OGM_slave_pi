@@ -383,6 +383,11 @@ from `ogm_pi.pin_runtime`.
 - BOARD_STATS uptime uses the daemon service lifetime (resets on service restart).
 - BOARD_SHUTDOWN is an edge-triggered admin pin (`1 coil + 1 discrete online flag`): when its coil is set true the daemon clears the coil, sets online false, then runs `sudo -n /usr/local/sbin/ogm_pi_shutdown` (installed by `install_pi.sh`, executes `shutdown now` as root). Wake is not implemented; bring the slave back by external power cycle.
 - GPIO collisions are hard-fail: runtime pin handlers and child apps cannot claim the same line.
+- `INPUT_DIGITAL` uses active-low GPIO input (`pull_up=True`) and supports
+  optional `args: [latch_ms, debounce_ms]`. `latch_ms` is the minimum reported
+  state time for both pressed and released states; `debounce_ms` applies only to
+  rising/pressed transitions. Changing args changes the pin hash, so regenerate
+  and redeploy the matching master/bridge/Pi pinmaps together.
 
 ## Example Raspberry Pi board entry
 
@@ -395,7 +400,7 @@ from `ogm_pi.pin_runtime`.
   reset_on_init: true
   pins:
     # Use Raspberry Pi BCM GPIO numbering.
-    - { name: pi_input_1,  type: INPUT_DIGITAL,  pin: 17 }
+    - { name: pi_input_1,  type: INPUT_DIGITAL,  pin: 17, args: [200, 0] }
     - { name: pi_input_2,  type: INPUT_DIGITAL,  pin: 27 }
     - { name: pi_output_1, type: OUTPUT_DIGITAL, pin: 22, args: [0] }
     - { name: pi_output_2, type: OUTPUT_DIGITAL, pin: 23, args: [0] }
