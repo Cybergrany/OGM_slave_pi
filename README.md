@@ -386,8 +386,10 @@ from `ogm_pi.pin_runtime`.
 - `INPUT_DIGITAL` uses active-low GPIO input (`pull_up=True`) and supports
   optional `args: [latch_ms, debounce_ms]`. `latch_ms` is the minimum reported
   state time for both pressed and released states; `debounce_ms` applies only to
-  rising/pressed transitions. Changing args changes the pin hash, so regenerate
-  and redeploy the matching master/bridge/Pi pinmaps together.
+  rising/pressed transitions. The asymmetric form
+  `args: [high_latch_ms, debounce_ms, low_latch_ms]` can retain brief presses
+  without delaying the next press while released. Changing args changes the pin
+  hash, so regenerate and redeploy matching master/bridge/Pi pinmaps together.
 
 ## Example Raspberry Pi board entry
 

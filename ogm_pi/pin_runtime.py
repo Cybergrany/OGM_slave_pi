@@ -311,8 +311,12 @@ class InputDigital(PinHandler):
         super().__init__(pin, store, runtime)
         self.di = RegHandle(store, "discretes", pin.discretes, 0)
         self._line = _resolve_gpio_line(pin.pin)
-        self._latch_ms, self._debounce_ms = self._parse_timing_args()
-        self._timed = self._latch_ms > 0 or self._debounce_ms > 0
+        self._high_latch_ms, self._debounce_ms, self._low_latch_ms = self._parse_timing_args()
+        self._timed = (
+            self._high_latch_ms > 0
+            or self._low_latch_ms > 0
+            or self._debounce_ms > 0
+        )
         self._primed = False
         self._sample_high = False
         self._stable_high = False
@@ -334,21 +338,30 @@ class InputDigital(PinHandler):
             return 0
         return parsed
 
-    def _parse_timing_args(self) -> tuple[int, int]:
+    def _parse_timing_args(self) -> tuple[int, int, int]:
         args = self.pin.args
         if not args:
-            return 0, 0
-        if len(args) != 2:
+            return 0, 0, 0
+        if len(args) not in (2, 3):
             LOGGER.warning(
-                "InputDigital %s timing args must be [latch_ms, debounce_ms], got %r; using 0",
+                "InputDigital %s timing args must be [latch_ms, debounce_ms] or "
+                "[high_latch_ms, debounce_ms, low_latch_ms], got %r; using 0",
                 self.pin.name,
                 args,
             )
-            return 0, 0
-        return (
-            self._parse_timing_value(self.pin.name, "latch_ms", args[0]),
-            self._parse_timing_value(self.pin.name, "debounce_ms", args[1]),
+            return 0, 0, 0
+        high_latch_ms = self._parse_timing_value(
+            self.pin.name,
+            "high_latch_ms" if len(args) == 3 else "latch_ms",
+            args[0],
         )
+        debounce_ms = self._parse_timing_value(self.pin.name, "debounce_ms", args[1])
+        low_latch_ms = (
+            self._parse_timing_value(self.pin.name, "low_latch_ms", args[2])
+            if len(args) == 3
+            else high_latch_ms
+        )
+        return high_latch_ms, debounce_ms, low_latch_ms
 
     def init(self) -> None:
         if self._line is None:
@@ -429,7 +442,8 @@ class InputDigital(PinHandler):
             self._pending_valid = False
             return
 
-        if self._latch_ms == 0 or self._elapsed_ms(now, self._reported_changed_at) >= self._latch_ms:
+        latch_ms = self._high_latch_ms if self._reported_high else self._low_latch_ms
+        if latch_ms == 0 or self._elapsed_ms(now, self._reported_changed_at) >= latch_ms:
             self._pending_valid = False
             self._set_reported_state(desired_high, now)
             return
@@ -440,7 +454,8 @@ class InputDigital(PinHandler):
     def _apply_pending_if_ready(self, now: float) -> None:
         if not self._pending_valid:
             return
-        if self._latch_ms != 0 and self._elapsed_ms(now, self._reported_changed_at) < self._latch_ms:
+        latch_ms = self._high_latch_ms if self._reported_high else self._low_latch_ms
+        if latch_ms != 0 and self._elapsed_ms(now, self._reported_changed_at) < latch_ms:
             return
 
         pending_high = self._pending_high

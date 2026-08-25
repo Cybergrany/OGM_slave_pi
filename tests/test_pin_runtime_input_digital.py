@@ -94,6 +94,24 @@ class InputDigitalTimingTest(unittest.TestCase):
         handler.update(0.501)
         self.assertEqual(read_discrete(store), 0)
 
+    def test_zero_low_latch_allows_immediate_repeat_press(self) -> None:
+        handler, store, gpio = make_input([200, 0, 0])
+
+        handler.update(0.0)
+        set_pressed(gpio, True)
+        handler.update(0.01)
+        self.assertEqual(read_discrete(store), 1)
+
+        set_pressed(gpio, False)
+        handler.update(0.02)
+        self.assertEqual(read_discrete(store), 1)
+        handler.update(0.211)
+        self.assertEqual(read_discrete(store), 0)
+
+        set_pressed(gpio, True)
+        handler.update(0.212)
+        self.assertEqual(read_discrete(store), 1)
+
     def test_rising_debounce_suppresses_short_press(self) -> None:
         handler, store, gpio = make_input([0, 50])
 
