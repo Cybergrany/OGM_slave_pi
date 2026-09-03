@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODE=${1:---preflight}
+ARG=${2:-}
+CONFIG=/etc/default/ups-shutdown
+STATE_DIR=/var/lib/ups-shutdown
+MONITOR=/usr/local/sbin/ups-shutdown.py
+
+need_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo "Run this mode with sudo." >&2
+        exit 2
+    fi
+}
+
+load_config() {
+    # shellcheck disable=SC1090
+    source "$CONFIG"
+    GPIO_INPUT=${GPIO_INPUT:-12}
+    POWER_FAIL_LEVEL=${POWER_FAIL_LEVEL:-HIGH}
+}
+
+raw_gpio_level() {
+    local pin=$1 out
+    if command -v pinctrl >/dev/null 2>&1; then
+        out=$(pinctrl get "$pin" 2>/dev/null || true)
+    elif command -v raspi-gpio >/dev/null 2>&1; then
+        out=$(raspi-gpio get "$pin" 2>/dev/null || true)
+    else
+        return 1
+    fi
+    if grep -Eqi '(^|[|[:space:]])hi([[:space:]]|$)' <<<"$out"; then
+        echo HIGH
+    elif grep -Eqi '(^|[|[:space:]])lo([[:space:]]|$)' <<<"$out"; then
+        echo LOW
+    else
+        return 1
+    fi
+}
+
+preflight() {
+    load_config
+    GPIO_POWEROFF_PIN=${GPIO_POWEROFF_PIN:-26}
+    echo "=== Internal monitor tests ==="
+    "$MONITOR" --self-test
+
+    echo
+echo "=== Host overlay ==="
+    /usr/local/sbin/ups-shutdown-host-setup --check
+
+    echo
+echo "=== Service ==="
+    systemctl is-enabled ups-shutdown.service
+    systemctl is-active ups-shutdown.service
+    systemctl is-enabled ups-shutdown-clean-marker.service
+
+    echo
+echo "=== Legacy service ==="
+    if systemctl cat gpoi_shutdown.service >/dev/null 2>&1 || [[ -e /etc/systemd/system/gpoi_shutdown.service ]]; then
+        echo "FAIL: legacy gpoi_shutdown.service still exists" >&2
+        return 1
+    fi
+    echo "Legacy gpoi_shutdown.service: absent"
+
+    echo
+echo "=== GPIO ownership ==="
+    local lines
+    lines=$(gpioinfo 2>/dev/null | grep -E "\"GPIO(${GPIO_INPUT}|${GPIO_POWEROFF_PIN})\"" || true)
+    echo "$lines"
+    if ! grep -E "\"GPIO${GPIO_POWEROFF_PIN}\"[[:space:]]+\"power_ctrl\".*output.*active-low.*\[used\]" <<<"$lines" >/dev/null; then
+        echo "FAIL: GPIO${GPIO_POWEROFF_PIN} is not owned by power_ctrl" >&2
+        return 1
+    fi
+    if ! grep -E "\"GPIO${GPIO_INPUT}\".*\[used" <<<"$lines" >/dev/null; then
+        echo "FAIL: GPIO${GPIO_INPUT} is not currently owned by the monitor" >&2
+        return 1
+    fi
+
+    local main_pid state_pid
+    main_pid=$(systemctl show ups-shutdown.service -p MainPID --value)
+    state_pid=$(python3 - "$STATE_DIR/current.json" <<'PY_STATE'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get('monitor_pid', ''))
+except Exception:
+    print('')
+PY_STATE
+)
+    if [[ -z "$main_pid" || "$main_pid" == 0 || "$state_pid" != "$main_pid" ]]; then
+        echo "FAIL: systemd MainPID ($main_pid) does not match the monitor flight-recorder PID ($state_pid)." >&2
+        return 1
+    fi
+    echo "GPIO owner monitor PID: $main_pid (systemd and flight recorder agree)"
+
+    local raw
+    if raw=$(raw_gpio_level "$GPIO_INPUT"); then
+        echo "GPIO$GPIO_INPUT raw level: $raw"
+        echo "Configured failure level: ${POWER_FAIL_LEVEL^^}"
+        if [[ "${raw^^}" == "${POWER_FAIL_LEVEL^^}" ]]; then
+            echo "WARNING: mains-failure state is currently asserted." >&2
+        fi
+    else
+        echo "WARNING: unable to read raw GPIO level non-invasively (pinctrl/raspi-gpio unavailable)." >&2
+    fi
+
+    echo
+    echo "=== Dedicated history retention ==="
+    [[ -r /etc/logrotate.d/ups-shutdown ]] || { echo "FAIL: /etc/logrotate.d/ups-shutdown missing" >&2; return 1; }
+    command -v logrotate >/dev/null 2>&1 || { echo "FAIL: logrotate not installed" >&2; return 1; }
+    logrotate --debug /etc/logrotate.d/ups-shutdown >/dev/null 2>&1 || { echo "FAIL: logrotate policy is invalid" >&2; return 1; }
+    echo "UPS history rotation policy: OK (monthly, ~1 year retention, 5 MiB emergency rotation)"
+
+    echo
+echo "=== Current state ==="
+    [[ -r "$STATE_DIR/current.json" ]] && cat "$STATE_DIR/current.json" || true
+
+    echo
+echo "PRE-PRODUCTION PREFLIGHT: PASS"
+}
+
+case "$MODE" in
+    --preflight)
+        preflight
+        ;;
+
+    --arm-live-test)
+        need_root
+        [[ -n "$ARG" ]] || { echo "Usage: sudo ups-shutdown-smoke-test --arm-live-test SECONDS" >&2; exit 2; }
+        if ! [[ "$ARG" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            echo "SECONDS must be numeric." >&2; exit 2
+        fi
+        python3 - "$ARG" <<'PY'
+import sys
+n=float(sys.argv[1])
+if not 5 <= n <= 60:
+    raise SystemExit("Live smoke timeout must be between 5 and 60 seconds")
+PY
+        preflight
+        load_config
+        RAW=$(raw_gpio_level "$GPIO_INPUT") || { echo "Cannot safely arm live test without pinctrl/raspi-gpio raw-state check." >&2; exit 3; }
+        if [[ "${RAW^^}" == "${POWER_FAIL_LEVEL^^}" ]]; then
+            echo "REFUSING: GPIO$GPIO_INPUT already indicates mains failure." >&2
+            exit 3
+        fi
+
+        echo
+        echo "This will restart the monitor once with SHUTDOWN_AFTER=$ARG seconds."
+        echo "The configuration file is restored to its production value immediately after restart,"
+        echo "so the next host boot automatically returns to the production timeout."
+        read -r -p "Type ARM to continue: " CONFIRM
+        [[ "$CONFIRM" == ARM ]] || { echo "Cancelled."; exit 1; }
+
+        STAMP=$(date +%Y%m%d-%H%M%S)
+        BACKUP="$STATE_DIR/smoke-config-$STAMP.bak"
+        TEST_ARM_DIR=/run/ups-shutdown
+        TEST_ARM_FILE="$TEST_ARM_DIR/allow-short-test"
+        SMOKE_SETUP_COMPLETE=0
+        smoke_setup_cleanup() {
+            local rc=$?
+            if [[ "$SMOKE_SETUP_COMPLETE" -eq 0 && -f "$BACKUP" ]]; then
+                cp -a "$BACKUP" "$CONFIG" 2>/dev/null || true
+                rm -f "$TEST_ARM_FILE"
+                systemctl restart ups-shutdown.service >/dev/null 2>&1 || true
+                echo "Smoke-test setup did not complete; production config was restored." >&2
+            fi
+            return "$rc"
+        }
+        trap smoke_setup_cleanup EXIT
+
+        install -d -m 0755 "$TEST_ARM_DIR"
+        cat /proc/sys/kernel/random/boot_id > "$TEST_ARM_FILE"
+        chmod 0600 "$TEST_ARM_FILE"
+        cp -a "$CONFIG" "$BACKUP"
+        cp -a "$CONFIG" "$CONFIG.smoke-tmp"
+        python3 - "$CONFIG.smoke-tmp" "$ARG" <<'PY'
+import re, sys
+from pathlib import Path
+p=Path(sys.argv[1]); value=sys.argv[2]
+text=p.read_text()
+if re.search(r'^SHUTDOWN_AFTER=.*$', text, flags=re.M):
+    text=re.sub(r'^SHUTDOWN_AFTER=.*$', f'SHUTDOWN_AFTER={value}', text, flags=re.M)
+else:
+    text += f'\nSHUTDOWN_AFTER={value}\n'
+p.write_text(text)
+PY
+        mv "$CONFIG.smoke-tmp" "$CONFIG"
+        if ! systemctl restart ups-shutdown.service; then
+            cp -a "$BACKUP" "$CONFIG"
+            rm -f "$TEST_ARM_FILE"
+            systemctl restart ups-shutdown.service || true
+            echo "Failed to start short-timeout monitor; production config restored." >&2
+            exit 4
+        fi
+        sleep 2
+        RUNNING_THRESHOLD=$(python3 - "$STATE_DIR/current.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1])).get('shutdown_after','unknown'))
+PY
+)
+        if [[ "$RUNNING_THRESHOLD" != "$ARG" && "$RUNNING_THRESHOLD" != "${ARG}.0" ]]; then
+            cp -a "$BACKUP" "$CONFIG"
+            rm -f "$TEST_ARM_FILE"
+            systemctl restart ups-shutdown.service || true
+            echo "Could not verify the running test threshold (saw $RUNNING_THRESHOLD); test cancelled." >&2
+            exit 4
+        fi
+
+        # Restore production file WITHOUT restarting. Current process retains test value;
+        # the next boot/restart loads production automatically.
+        cp -a "$BACKUP" "$CONFIG"
+        rm -f "$TEST_ARM_FILE"
+        sync "$CONFIG" 2>/dev/null || sync
+        SMOKE_SETUP_COMPLETE=1
+        trap - EXIT
+
+        echo
+        echo "LIVE TEST ARMED"
+        echo "  Running monitor timeout: $RUNNING_THRESHOLD seconds"
+        echo "  On-disk production config: restored"
+        echo "  GPIO$GPIO_INPUT currently: $RAW (healthy)"
+        echo
+        echo "Now perform the controlled mains cut. The router/SSH may disappear immediately,"
+        echo "but the Pi should remain powered until this timeout, shut down cleanly, then GPIO26"
+        echo "should release the relay. After power returns, run:"
+        echo "  sudo ups-shutdown-smoke-test --verify-last-live-test"
+        echo
+        echo "If you ABORT the physical test, reload production timeout now with:"
+        echo "  sudo ups-shutdown-smoke-test --cancel-live-test"
+        ;;
+
+    --cancel-live-test)
+        need_root
+        rm -f /run/ups-shutdown/allow-short-test
+        systemctl restart ups-shutdown.service
+        echo "Production configuration reloaded."
+        /usr/local/sbin/ups-shutdown-status
+        ;;
+
+    --verify-last-live-test)
+        if [[ ! -r "$STATE_DIR/last-report.txt" ]]; then
+            echo "No previous-boot report exists." >&2
+            exit 1
+        fi
+        cat "$STATE_DIR/last-report.txt"
+        if grep -Fq 'UPS-triggered graceful shutdown completed through systemd' "$STATE_DIR/last-report.txt"; then
+            echo
+            echo "LIVE POWER-LOSS SMOKE TEST: PASS"
+        else
+            echo
+            echo "LIVE POWER-LOSS SMOKE TEST: NOT CONFIRMED - inspect ups-shutdown-status and journalctl." >&2
+            exit 1
+        fi
+        ;;
+
+    -h|--help)
+        cat <<'USAGE'
+Usage:
+  ups-shutdown-smoke-test --preflight
+  sudo ups-shutdown-smoke-test --arm-live-test 15
+  sudo ups-shutdown-smoke-test --cancel-live-test
+  ups-shutdown-smoke-test --verify-last-live-test
+USAGE
+        ;;
+    *)
+        echo "Unknown mode: $MODE" >&2
+        exit 2
+        ;;
+esac

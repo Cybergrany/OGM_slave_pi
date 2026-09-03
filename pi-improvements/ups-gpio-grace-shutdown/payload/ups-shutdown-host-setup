@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODE=check
+REPLACE=0
+for arg in "$@"; do
+    case "$arg" in
+        --check) MODE=check ;;
+        --apply) MODE=apply ;;
+        --replace-existing) MODE=apply; REPLACE=1 ;;
+        -h|--help)
+            cat <<'USAGE'
+Usage:
+  sudo ups-shutdown-host-setup --check
+  sudo ups-shutdown-host-setup --apply
+  sudo ups-shutdown-host-setup --replace-existing
+
+--apply adds the gpio-poweroff overlay if none is present.
+--replace-existing is required before replacing a different active gpio-poweroff line.
+Exit code 10 means the boot config was changed and a reboot is required.
+USAGE
+            exit 0
+            ;;
+        *) echo "Unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
+if [[ $EUID -ne 0 && "$MODE" == apply ]]; then
+    echo "Run --apply as root (sudo)." >&2
+    exit 2
+fi
+
+CONFIG=/etc/default/ups-shutdown
+if [[ -r "$CONFIG" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG"
+fi
+GPIO_POWEROFF_PIN=${GPIO_POWEROFF_PIN:-26}
+GPIO_POWEROFF_ACTIVE_DELAY_MS=${GPIO_POWEROFF_ACTIVE_DELAY_MS:-1000}
+GPIO_POWEROFF_INACTIVE_DELAY_MS=${GPIO_POWEROFF_INACTIVE_DELAY_MS:-1000}
+EXPECTED="dtoverlay=gpio-poweroff,gpiopin=${GPIO_POWEROFF_PIN},active_low=1,active_delay_ms=${GPIO_POWEROFF_ACTIVE_DELAY_MS},inactive_delay_ms=${GPIO_POWEROFF_INACTIVE_DELAY_MS}"
+
+if [[ -f /boot/firmware/config.txt ]]; then
+    BOOT_CONFIG=/boot/firmware/config.txt
+elif [[ -f /boot/config.txt ]]; then
+    BOOT_CONFIG=/boot/config.txt
+else
+    echo "Cannot find /boot/firmware/config.txt or /boot/config.txt" >&2
+    exit 2
+fi
+
+mapfile -t EXISTING < <(grep -nE '^[[:space:]]*dtoverlay=gpio-poweroff([,[:space:]]|$)' "$BOOT_CONFIG" || true)
+EXACT=0
+if grep -Fxq "$EXPECTED" "$BOOT_CONFIG"; then
+    EXACT=1
+fi
+
+echo "Boot config: $BOOT_CONFIG"
+echo "Expected:    $EXPECTED"
+if ((${#EXISTING[@]})); then
+    echo "Existing gpio-poweroff line(s):"
+    printf '  %s\n' "${EXISTING[@]}"
+else
+    echo "Existing gpio-poweroff line(s): none"
+fi
+
+if [[ "$MODE" == check ]]; then
+    if (( EXACT == 0 )); then
+        echo "BOOT CONFIG: NOT MATCHING"
+        exit 1
+    fi
+    if [[ -x /usr/local/sbin/ups-shutdown.py ]]; then
+        exec /usr/local/sbin/ups-shutdown.py --preflight
+    fi
+    echo "BOOT CONFIG: OK (live overlay check unavailable until monitor is installed)"
+    exit 0
+fi
+
+CHANGED=0
+if (( EXACT == 1 )); then
+    echo "Boot config already contains the exact required overlay."
+elif ((${#EXISTING[@]} > 0)) && (( REPLACE == 0 )); then
+    echo >&2
+    echo "A different gpio-poweroff configuration already exists." >&2
+    echo "Refusing to replace power-control configuration automatically." >&2
+    echo "Review it, then rerun with --replace-existing if replacement is intentional." >&2
+    exit 3
+else
+    STAMP=$(date +%Y%m%d-%H%M%S)
+    BACKUP="${BOOT_CONFIG}.ups-shutdown.${STAMP}.bak"
+    cp -a "$BOOT_CONFIG" "$BACKUP"
+    echo "Backup: $BACKUP"
+
+    if ((${#EXISTING[@]} > 0)); then
+        python3 - "$BOOT_CONFIG" <<'PY'
+import re, sys
+from pathlib import Path
+p=Path(sys.argv[1])
+text=p.read_text()
+lines=[]
+for line in text.splitlines():
+    if re.match(r'^\s*dtoverlay=gpio-poweroff(?:[,\s]|$)', line):
+        lines.append('# ups-shutdown replaced previous setting: ' + line)
+    else:
+        lines.append(line)
+p.write_text('\n'.join(lines)+'\n')
+PY
+    fi
+
+    cat >> "$BOOT_CONFIG" <<CFG
+
+# UPS shutdown relay control - managed by ups-shutdown-host-setup
+[all]
+$EXPECTED
+CFG
+    sync "$BOOT_CONFIG" 2>/dev/null || sync
+    CHANGED=1
+    echo "Boot config updated."
+fi
+
+if [[ -x /usr/local/sbin/ups-shutdown.py ]] && /usr/local/sbin/ups-shutdown.py --preflight >/dev/null 2>&1; then
+    echo "LIVE OVERLAY: OK"
+else
+    echo "LIVE OVERLAY: not yet active with the required configuration."
+    if (( CHANGED == 1 )); then
+        echo "A reboot is required before the UPS monitor can arm."
+        exit 10
+    fi
+    echo "The boot file matches but the live device tree does not. Reboot the host."
+    exit 10
+fi

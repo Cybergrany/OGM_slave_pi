@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -u
+
+CONFIG=/etc/default/ups-shutdown
+STATE_DIR=/var/lib/ups-shutdown
+MONITOR=/usr/local/sbin/ups-shutdown.py
+GPIO_INPUT=12
+GPIO_POWEROFF_PIN=26
+if [[ -r "$CONFIG" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG"
+fi
+
+echo "=== UPS shutdown service ==="
+systemctl --no-pager --full status ups-shutdown.service 2>/dev/null | sed -n '1,12p' || true
+printf 'Enabled: '
+systemctl is-enabled ups-shutdown.service 2>/dev/null || true
+printf 'Main PID: '
+systemctl show ups-shutdown.service -p MainPID --value 2>/dev/null || true
+printf 'Restarts this boot: '
+systemctl show ups-shutdown.service -p NRestarts --value 2>/dev/null || true
+
+echo
+echo "=== Configuration ==="
+if [[ -r "$CONFIG" ]]; then
+    grep -Ev '^\s*(#|$)' "$CONFIG" || true
+else
+    echo "MISSING: $CONFIG"
+fi
+
+echo
+echo "=== Host gpio-poweroff prerequisite ==="
+if [[ -x "$MONITOR" ]]; then
+    "$MONITOR" --preflight 2>&1 || true
+else
+    echo "MISSING: $MONITOR"
+fi
+
+echo
+echo "=== Live GPIO ==="
+if command -v gpioinfo >/dev/null 2>&1; then
+    gpioinfo 2>/dev/null | grep -E "\"GPIO(${GPIO_INPUT}|${GPIO_POWEROFF_PIN})\"" || true
+else
+    echo "gpioinfo not installed"
+fi
+if command -v pinctrl >/dev/null 2>&1; then
+    pinctrl get "$GPIO_INPUT" 2>/dev/null || true
+    pinctrl get "$GPIO_POWEROFF_PIN" 2>/dev/null || true
+elif command -v raspi-gpio >/dev/null 2>&1; then
+    raspi-gpio get "$GPIO_INPUT" 2>/dev/null || true
+    raspi-gpio get "$GPIO_POWEROFF_PIN" 2>/dev/null || true
+fi
+
+echo
+echo "=== Current monitor snapshot ==="
+if [[ -r "$STATE_DIR/current.json" ]]; then
+    cat "$STATE_DIR/current.json"
+else
+    echo "No current state yet."
+fi
+
+echo
+echo "=== Previous-boot assessment ==="
+if [[ -r "$STATE_DIR/last-report.txt" ]]; then
+    cat "$STATE_DIR/last-report.txt"
+else
+    echo "No report yet."
+fi
+
+echo
+echo "=== Recent monitor events ==="
+if [[ -r "$STATE_DIR/history.log" ]]; then
+    tail -n 15 "$STATE_DIR/history.log"
+else
+    echo "No history yet."
+fi
+
+echo
+echo "=== Dedicated history retention ==="
+if [[ -r /etc/logrotate.d/ups-shutdown ]]; then
+    cat /etc/logrotate.d/ups-shutdown
+else
+    echo "MISSING: /etc/logrotate.d/ups-shutdown"
+fi

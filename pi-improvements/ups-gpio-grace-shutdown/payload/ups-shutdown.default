@@ -1,0 +1,27 @@
+# UPS shutdown monitor configuration
+# BCM GPIO numbering.
+
+# UPS/mains status input. The existing installation uses GPIO12 with an
+# internal pull-up. The electrical input is LOW while mains is healthy and
+# HIGH on mains failure.
+GPIO_INPUT=12
+GPIO_PULL=UP
+POWER_FAIL_LEVEL=HIGH
+
+# Continuous mains-loss interval required before requesting host poweroff.
+SHUTDOWN_AFTER=300
+
+# A healthy input must remain stable this long before an active outage timer
+# is cancelled. This prevents a brief good-state glitch resetting 5 minutes.
+RESTORE_DEBOUNCE=3
+POLL_INTERVAL=1
+
+# Host poweroff retry behaviour.
+SHUTDOWN_RETRY_SECONDS=5
+SHUTDOWN_ACCEPTED_WATCHDOG=30
+
+# Kernel gpio-poweroff prerequisite. This remains host/device-tree owned.
+GPIO_POWEROFF_PIN=26
+GPIO_POWEROFF_ACTIVE_DELAY_MS=1000
+GPIO_POWEROFF_INACTIVE_DELAY_MS=1000
+

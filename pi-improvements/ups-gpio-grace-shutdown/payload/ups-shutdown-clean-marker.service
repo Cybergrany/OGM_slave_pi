@@ -1,0 +1,17 @@
+[Unit]
+Description=UPS shutdown independent clean-shutdown witness
+Documentation=file:/usr/local/share/doc/ups-shutdown/README.md
+DefaultDependencies=no
+Before=shutdown.target umount.target
+RequiresMountsFor=/var/lib/ups-shutdown
+RefuseManualStart=yes
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/default/ups-shutdown
+ExecStart=/usr/local/sbin/ups-shutdown.py --mark-clean-shutdown
+User=root
+Group=root
+
+[Install]
+WantedBy=shutdown.target

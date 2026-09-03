@@ -1,0 +1,14 @@
+2d205896458e864aa62ece20a586829de6a4d7f26a8e6818bf3559efb903e613  ./README.md
+3a365ef1513cf17a8bf9c28d3f969d7d9a89e7fd48d4c76ca7801866dd91028b  ./VERSION
+aaea1034249e4d2f8a6e927b489abdb74c3f167654550f153ab364f9fc5dbb1a  ./install-ups-shutdown.sh
+de92c116118ac749e865851faf2c12c513c714213d911dcc5afa479076cf1d68  ./payload/remove-legacy-gpoi-service.sh
+bb02dca83843aaf48de66b954eb127e701f50de86355e09d2e310e34f710a8a9  ./payload/ups-shutdown-clean-marker.service
+7ea435737ca726c461bb1021a1ed51b7afa423ed9b3bd588403eb6e832c96f5c  ./payload/ups-shutdown-host-setup
+4ea9f71568e6d5312ee42e0d370d6fe00d400be2759bc97feb806a1f77b89601  ./payload/ups-shutdown-smoke-test
+6a804521873d6118fd130b0ccc816c9f305c967cf1742cc3c03f83496b53c768  ./payload/ups-shutdown-status
+bb3bb4c1de4e522cb719df9941e331778a3dab862621fd89c7915d75df1d4efb  ./payload/ups-shutdown.default
+8793b273c262decbf46756cb08977c2d424bed4d38a809b1f127603339190f91  ./payload/ups-shutdown.logrotate
+41789693a27a4b95af0152973e0ad1b0252cbe684db2adc1705ad3e86662ebeb  ./payload/ups-shutdown.py
+896510ee4d2f16009920b1d9b835f5a2ee74b57d974f478e02ad8d5b482b0ecf  ./payload/ups-shutdown.service
+34efcee20494ffd97e1df187badadc7834c099bf51a62fc238c4ec4d76693c25  ./remove-legacy-gpoi-service.sh
+0ea2c0d0974b9289e319a6e262a1b092a85a3f6201b62f5171982ca8d981618c  ./uninstall-ups-shutdown.sh

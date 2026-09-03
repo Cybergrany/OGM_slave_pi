@@ -1,0 +1,11 @@
+/var/lib/ups-shutdown/history.log /var/lib/ups-shutdown/history.jsonl {
+    monthly
+    rotate 13
+    maxage 365
+    maxsize 5M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    su root root
+}

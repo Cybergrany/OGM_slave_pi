@@ -1,0 +1,32 @@
+[Unit]
+Description=UPS mains-loss monitor and graceful host shutdown
+Documentation=file:/usr/local/share/doc/ups-shutdown/README.md
+After=local-fs.target
+RequiresMountsFor=/var/lib/ups-shutdown
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/ups-shutdown
+ExecStartPre=/usr/local/sbin/ups-shutdown.py --preflight
+ExecStart=/usr/local/sbin/ups-shutdown.py
+User=root
+Group=root
+Restart=on-failure
+RestartSec=5s
+RestartPreventExitStatus=78
+OOMScoreAdjust=-900
+MemoryMax=128M
+TasksMax=32
+TimeoutStopSec=15s
+KillSignal=SIGTERM
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadWritePaths=/var/lib/ups-shutdown
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ups-shutdown
+
+[Install]
+WantedBy=multi-user.target
