@@ -74,6 +74,12 @@ pip install -r requirements.txt
 python3 scripts/export_pinmap.py --address 99 --output out/pinmap_99.json
 ```
 Notes:
+- The exporter accepts version-1 definitions and version-2 definitions with
+  boards/bridges under `networks`. Traits and exported pinmap JSON remain version 1.
+- With version 2, baud comes from the selected network's `serial.baud`. If an
+  address appears on multiple networks, use `--name` or `--network <network_name>`.
+  The Core deployment wrapper currently selects by address, so ambiguous board
+  addresses require exporting explicitly rather than guessing a network.
 - Use `--name <board_name>` instead of `--address` if you prefer names.
 - Use `--skip-external` to ignore boards marked `external_management: true`.
 - For bridge children, use `--child-name`/`--child-address` and optionally `--bridge-name`:

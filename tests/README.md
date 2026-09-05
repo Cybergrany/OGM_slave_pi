@@ -7,6 +7,8 @@ root. `test_rtu_framing.py` covers mixed RTU streams and fragmentation;
 `test_modbus_receive.py` exercises the production receive/dispatch path with
 simulated serial delivery. See [Modbus RX framing](../docs/modbus_rx_framing.md)
 for the recovery contract and physical-validation limits.
+`test_export_pinmap.py` covers version-1/version-2 source compatibility, network
+selection and baud, and unchanged board/bridge-child layouts and hashes.
 
 This folder contains a deploy-loadable GUI-emulation app that validates new
 `OGM_slave_pi` app/runtime hooks on a real Pi.

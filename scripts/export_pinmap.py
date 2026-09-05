@@ -44,9 +44,64 @@ def load_yaml(path: Path) -> Dict[str, Any]:
 
 
 def ensure_version(data: Dict[str, Any], path: Path) -> None:
-    """Validate version field for traits/config compatibility."""
+    """Traits still use schema version 1, independently of the IO source."""
     if int(data.get("version", 0)) != 1:
         raise ExportError(f"{path} must set version: 1")
+
+
+def normalize_config(data: Dict[str, Any], path: Path) -> Dict[str, Any]:
+    """Expose v1 owners or flatten v2 networks without changing pin/hash data.
+
+    This exporter only needs ownership and baud metadata, not the master's
+    serial-adapter, queue or polling configuration. Keep it usable standalone
+    on a Pi without importing the PlatformIO generator.
+    """
+    try:
+        version = int(data.get("version", 0))
+    except (TypeError, ValueError):
+        raise ExportError(f"{path} must set version: 1 or 2") from None
+    if version == 1:
+        return data
+    if version != 2:
+        raise ExportError(f"{path} must set version: 1 or 2")
+    if "boards" in data or "bridges" in data:
+        raise ExportError(f"{path}: version 2 boards/bridges must be inside networks")
+    networks = data.get("networks")
+    if not isinstance(networks, list) or not networks:
+        raise ExportError(f"{path}: version 2 requires a non-empty networks list")
+    result = {**data, "boards": [], "bridges": []}
+    names: set[str] = set()
+    owners: set[str] = set()
+    for network in networks:
+        if not isinstance(network, dict):
+            raise ExportError(f"{path}: each network must be a mapping")
+        name = network.get("name")
+        if not isinstance(name, str) or not name or name in names:
+            raise ExportError(f"{path}: network names must be non-empty and unique")
+        names.add(name)
+        serial = network.get("serial")
+        baud = serial.get("baud") if isinstance(serial, dict) else None
+        if isinstance(baud, bool) or not isinstance(baud, int) or baud <= 0:
+            raise ExportError(f"{path}: network '{name}' must define serial.baud as a positive integer")
+        addresses: set[int] = set()
+        for kind in ("boards", "bridges"):
+            entries = network.get(kind, [])
+            if not isinstance(entries, list):
+                raise ExportError(f"{path}: network '{name}' {kind} must be a list")
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise ExportError(f"{path}: network '{name}' {kind} entries must be mappings")
+                owner = entry.get("name")
+                address = entry.get("address")
+                if not isinstance(owner, str) or not owner or owner in owners:
+                    raise ExportError(f"{path}: board/bridge names must be globally unique")
+                if (isinstance(address, bool) or not isinstance(address, int)
+                        or not 1 <= address <= 247 or address in addresses):
+                    raise ExportError(f"{path}: network '{name}' addresses must be unique integers in 1..247")
+                owners.add(owner)
+                addresses.add(address)
+                result[kind].append({**entry, "_network_name": name, "_network_baud": baud})
+    return result
 
 
 def load_traits(paths: Iterable[Path], namespace: str = "master") -> Tuple[Dict[str, Dict[str, int]], Dict[str, str]]:
@@ -347,13 +402,16 @@ def build_child_layout(
     }
 
 
-def select_board(data: Dict[str, Any], name: str | None, address: int | None) -> Dict[str, Any]:
+def select_board(data: Dict[str, Any], name: str | None, address: int | None,
+                 network: str | None = None) -> Dict[str, Any]:
     """Select a board definition by name or address."""
     boards = data.get("boards", [])
     if not isinstance(boards, list):
         raise ExportError("ExternalIODefines.yaml must define a list of boards")
 
     candidates = boards
+    if network is not None:
+        candidates = [b for b in candidates if b.get("_network_name", "primary") == network]
     if name is not None:
         candidates = [b for b in candidates if b.get("name") == name]
     if address is not None:
@@ -362,7 +420,7 @@ def select_board(data: Dict[str, Any], name: str | None, address: int | None) ->
     if not candidates:
         raise ExportError("No matching board found")
     if len(candidates) > 1:
-        raise ExportError("Multiple boards matched; use --name or --address to disambiguate")
+        raise ExportError("Multiple boards matched; use --name or --network to disambiguate")
     return candidates[0]
 
 
@@ -372,6 +430,7 @@ def select_child(
     child_address: int | None,
     bridge_name: str | None,
     bridge_address: int | None,
+    network: str | None = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Select a bridge child definition by name/address with optional bridge filter."""
     bridges = data.get("bridges", [])
@@ -380,6 +439,8 @@ def select_child(
 
     candidates: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
     for bridge in bridges:
+        if network is not None and bridge.get("_network_name", "primary") != network:
+            continue
         if bridge_name is not None and bridge.get("name") != bridge_name:
             continue
         if bridge_address is not None and int(bridge.get("address", -1)) != bridge_address:
@@ -395,7 +456,7 @@ def select_child(
         raise ExportError("No matching bridge child found")
     if len(candidates) > 1:
         names = ", ".join(f"{b.get('name')}/{c.get('name')}" for b, c in candidates)
-        raise ExportError(f"Multiple bridge children matched; use --bridge-name/--bridge-address to disambiguate ({names})")
+        raise ExportError(f"Multiple bridge children matched; use --bridge-name/--bridge-address/--network to disambiguate ({names})")
     return candidates[0]
 
 
@@ -411,6 +472,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--name", help="Board name to export")
     parser.add_argument("--address", type=int, help="Board Modbus address to export")
+    parser.add_argument("--network", help="Network name to disambiguate version-2 addresses")
     parser.add_argument("--child-name", help="Bridge child name to export")
     parser.add_argument("--child-address", type=int, help="Bridge child downstream address to export")
     parser.add_argument("--bridge-name", help="Bridge name to disambiguate child selection")
@@ -433,8 +495,7 @@ def main() -> int:
     config_path = Path(args.config)
     traits_paths = [Path(args.traits), Path(args.custom_traits)]
 
-    config = load_yaml(config_path)
-    ensure_version(config, config_path)
+    config = normalize_config(load_yaml(config_path), config_path)
     traits, aliases = load_traits(traits_paths)
 
     source_paths = {
@@ -449,18 +510,21 @@ def main() -> int:
             args.child_address,
             args.bridge_name,
             args.bridge_address,
+            args.network,
         )
         if args.skip_external and child.get("external_management", False):
             raise ExportError(
                 f"Bridge child '{bridge.get('name')}/{child.get('name')}' is marked external_management; "
                 "rerun without --skip-external"
             )
-        layout = build_child_layout(bridge, child, traits, aliases, config.get("network_baud", 0), source_paths)
+        layout = build_child_layout(bridge, child, traits, aliases,
+                                    bridge.get("_network_baud", config.get("network_baud", 0)), source_paths)
     else:
-        board = select_board(config, args.name, args.address)
+        board = select_board(config, args.name, args.address, args.network)
         if args.skip_external and board.get("external_management", False):
             raise ExportError(f"Board '{board.get('name')}' is marked external_management; rerun without --skip-external")
-        layout = build_layout(board, traits, aliases, config.get("network_baud", 0), source_paths)
+        layout = build_layout(board, traits, aliases,
+                              board.get("_network_baud", config.get("network_baud", 0)), source_paths)
     rendered = json.dumps(layout, indent=2, sort_keys=False)
 
     if args.output == "-":
