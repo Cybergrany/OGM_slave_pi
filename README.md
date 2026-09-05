@@ -40,6 +40,9 @@ logs and crash dumps are persisted under:
 
 ## Pi hook test app
 
+Modbus receive framing, custom shape hooks, diagnostics and rollout limits are
+documented in [Modbus RX framing](docs/modbus_rx_framing.md).
+
 Deploy-loadable GUI-emulation integration tests live under `tests/`.
 
 - Setup/install/run/uninstall guide: `tests/README.md`

@@ -1,5 +1,13 @@
 # OGM_slave_pi Pi Integration Tests
 
+## Host regression tests
+
+Run `python -B -m unittest discover -s tests -p 'test_*.py'` from the repository
+root. `test_rtu_framing.py` covers mixed RTU streams and fragmentation;
+`test_modbus_receive.py` exercises the production receive/dispatch path with
+simulated serial delivery. See [Modbus RX framing](../docs/modbus_rx_framing.md)
+for the recovery contract and physical-validation limits.
+
 This folder contains a deploy-loadable GUI-emulation app that validates new
 `OGM_slave_pi` app/runtime hooks on a real Pi.
 
